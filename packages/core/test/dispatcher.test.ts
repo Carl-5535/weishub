@@ -609,3 +609,35 @@ test('queueInfo 汇报运行中与排队数（/status 展示用）', async () =>
   await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
   expect(d.queueInfo('c1')).toEqual({ running: false, queued: 0 })
 })
+
+test('运行中切换 agent：结果仍返回，但 sessionId 不写到新 agent 头上', async () => {
+  const deferredFirst = deferred()
+  const seen: RunOptions[] = []
+  const { deps, replies } = makeDeps((async (config: AgentConfig, options: RunOptions) => {
+    seen.push(options)
+    if (seen.length === 1) return deferredFirst.promise
+    return { text: 'ok', sessionId: 'sess-new', exitCode: 0 }
+  }) as typeof runAgentTask)
+  const d = new ChatDispatcher(deps)
+  d.bind('room-1', 'claude')
+
+  // 任务 1（claude）启动
+  expect(d.submit('room-1', '慢任务')).toBe('accepted')
+  await vi.waitFor(() => expect(seen).toHaveLength(1))
+  expect(seen[0]!.sessionId).toBeUndefined()
+
+  // 运行中切到 codex：绑定换人，旧任务继续持有自己的 agent
+  d.bind('room-1', 'codex')
+  deferredFirst.resolve({ text: 'claude 的结果', sessionId: 'sess-claude-old', exitCode: 0 })
+  await vi.waitFor(() => expect(replies.some((r) => r.text === 'claude 的结果')).toBe(true)) // 结果仍返回
+
+  const binding = d.binding('room-1')!
+  expect(binding.agentName).toBe('codex')
+  expect(binding.sessionId).toBeUndefined() // claude 的会话 id 不得污染 codex
+
+  // 任务 2（codex）正常启动并写回自己的会话
+  d.submit('room-1', '新任务')
+  await vi.waitFor(() => expect(seen).toHaveLength(2))
+  expect(seen[1]!.sessionId).toBeUndefined() // 切换时已重置
+  await vi.waitFor(() => expect(d.binding('room-1')!.sessionId).toBe('sess-new'))
+})

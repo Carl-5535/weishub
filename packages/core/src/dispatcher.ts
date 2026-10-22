@@ -143,10 +143,13 @@ export class ChatDispatcher {
 
   /** 启动一个任务并接管其后续：成功回透结果、失败回错误文本、终态后驱动队列。 */
   private runTask(chatId: string, state: ChatState, text: string): void {
-    const config = this.agents.get(state.binding.agentName)
+    // 任务全程锁定启动时的 agent：运行中用户切换 agent 只影响后续任务，
+    // 本任务的执行、失败归属、会话写回都以这里的快照为准
+    const taskAgentName = state.binding.agentName
+    const config = this.agents.get(taskAgentName)
     if (!config) {
       // bind 校验过的 agent 不应缺失；防御性兜底，不抛出
-      void this.reply(chatId, `任务失败: 未知 agent（${state.binding.agentName}）`)
+      void this.reply(chatId, `任务失败: 未知 agent（${taskAgentName}）`)
       this.finishAndDrain(chatId, state)
       return
     }
@@ -164,8 +167,12 @@ export class ChatDispatcher {
     this.deps
       .run(config, options)
       .then((result: TaskResult) => {
-        // 会话写回：失败路径不经过这里，sessionId 只在新会话产生时更新
-        if (result.sessionId !== undefined) state.binding.sessionId = result.sessionId
+        // 会话写回：失败路径不经过这里，sessionId 只在新会话产生时更新。
+        // 仅当绑定仍指向本任务的 agent 时才写——运行中切过 agent 的话，
+        // 旧 agent 的会话 id 绝不能写到新 agent 头上（否则新 agent 会拿错会话恢复）
+        if (result.sessionId !== undefined && state.binding.agentName === taskAgentName) {
+          state.binding.sessionId = result.sessionId
+        }
         if (result.text !== '') return this.reply(chatId, result.text)
         return undefined
       })
@@ -173,8 +180,8 @@ export class ChatDispatcher {
         // stop 主动中止时已回复「已中止」，避免重复报错
         if (!state.abort?.signal.aborted) {
           const message = err instanceof Error ? err.message : String(err)
-          // 把「配置没配好」这类失败翻译成用户能照做的提示（未识别时保留原文）
-          return this.reply(chatId, formatAgentFailure(state.binding.agentName, message))
+          // 失败归属以任务启动时的 agent 为准（运行中切换不改历史）
+          return this.reply(chatId, formatAgentFailure(taskAgentName, message))
         }
         return undefined
       })
