@@ -34,6 +34,7 @@ import { discoverAgents, loadAgentConfigs } from '@weishub/core'
 import { isEntrypoint } from './entrypoint.js'
 import { DEFAULT_NOTIFY_PORT, DEFAULT_WEB_PORT, readHubConfig, resolvePorts } from './config.js'
 import { buildHub, startServe, type ServeOptions } from './serve.js'
+import { openInBrowser } from './open-browser.js'
 import { startWebServer } from './web-server.js'
 
 export function usage(): string {
@@ -127,7 +128,9 @@ export async function serve(
     })
     await bootstrap.start()
     const panel = await startWebServer({ hub: bootstrap, token: bootstrapToken, port: options.webPort })
-    stderr.write(`扫码面板：${panelUrl(panel.port, bootstrapToken)}\n`)
+    const bootstrapUrl = panelUrl(panel.port, bootstrapToken)
+    stderr.write(`扫码面板：${bootstrapUrl}\n`)
+    openInBrowser(bootstrapUrl)
     // 等待扫码期间的 Ctrl-C：也要释放锁（正式的 shutdown 在启动完成后才注册）
     const abortWait = (): void => {
       void (async () => {
@@ -175,8 +178,11 @@ export async function serve(
   }
 
   const web = await startWebServer({ hub, token, port: options.webPort })
-  stdout.write(`微枢已启动。面板地址：${panelUrl(web.port, token)}\n`)
+  const url = panelUrl(web.port, token)
+  stdout.write(`微枢已启动。面板地址：${url}\n`)
   stdout.write('微信消息将自动分发给绑定的 agent；按 Ctrl-C 停止。\n')
+  // 自动打开面板（WEISHUB_NO_OPEN=1 可关闭）
+  if (openInBrowser(url)) stdout.write('已在浏览器打开面板。\n')
 
   // 优雅停机：先关面板再停 Hub（停 Hub 会释放锁、落盘状态与发件箱断点）
   let stopping = false

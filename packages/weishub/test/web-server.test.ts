@@ -119,6 +119,24 @@ function makeHub(overrides: Partial<HubDeps> = {}): HubKit {
 
 const TOKEN = 'secret-token'
 
+
+/** 发原始 GET，返回状态码与 Location（fetch 无法覆写 Host / 观察 302 全貌）。 */
+function rawGetResponse(port: number, hostHeader: string, path: string, extraHeaders = ''): Promise<{ status: number; location?: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\n${extraHeaders}Connection: close\r\n\r\n`)
+    })
+    let buffer = ''
+    socket.on('data', (chunk) => { buffer += chunk })
+    socket.on('end', () => {
+      const status = Number(/^HTTP\/1\.1 (\d+)/.exec(buffer)?.[1] ?? 0)
+      const location = /\r\nlocation: ([^\r\n]+)/i.exec(buffer)?.[1]
+      resolve({ status, location })
+    })
+    socket.on('error', reject)
+  })
+}
+
 /** 用原始 socket 发 GET，便于构造自定义 Host 头（fetch 不允许覆写）。 */
 function rawGet(port: number, hostHeader: string, path: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -158,39 +176,38 @@ async function putJson(url: string, path: string, body: unknown): Promise<Respon
   })
 }
 
-test('页面与静态资源免 token；API 仍需 token', async () => {
+test('页面、静态资源、API 全部要求 token', async () => {
   const kit = makeHub()
   const { url } = await makeServer(kit.hub)
-  // 页面免鉴权：浏览器直接打开即可
-  expect((await fetch(`${url}/`)).status).toBe(200)
-  expect((await fetch(`${url}/app.js`)).status).toBe(200)
-  // API 仍然要 token
+  // 根路径无凭据时是 302（补 token），其余一律 401
+  expect((await fetch(`${url}/`, { redirect: 'manual' })).status).toBe(302)
+  expect((await fetch(`${url}/index.html`)).status).toBe(401)
+  expect((await fetch(`${url}/app.js`)).status).toBe(401)
   expect((await fetch(`${url}/api/state`)).status).toBe(401)
   expect((await fetch(`${url}/api/state`, { headers: { authorization: 'Bearer wrong' } })).status).toBe(401)
+  // 带 token 的页面地址可以正常打开
+  expect((await fetch(`${url}/?token=${TOKEN}`)).status).toBe(200)
+  expect((await fetch(`${url}/app.js?token=${TOKEN}`)).status).toBe(200)
   expect((await fetch(`${url}/api/state?token=${TOKEN}`)).status).toBe(200)
 })
 
-test('/api/session-token 免 token 下发（回环），供页面脚本取用', async () => {
-  const kit = makeHub()
-  const { url } = await makeServer(kit.hub)
-  const res = await fetch(`${url}/api/session-token`)
-  expect(res.status).toBe(200)
-  expect(await res.json()).toEqual({ token: TOKEN })
-})
-
-test('非回环 Host 访问页面时仍要求 token（防止端口被转发后暴露面板）', async () => {
-  // fetch 不允许覆写 Host 头，改用原始 socket 构造请求
+test('地址栏手输根路径（无任何凭据）重定向到带 token 的地址', async () => {
+  // 浏览器地址栏不发 Authorization 头，等价于「人手输 localhost:8090」——自动补 token
   const kit = makeHub()
   const { port } = await makeServer(kit.hub)
-  const remote = await rawGet(port, '192.168.1.10:8090', '/')
-  expect(remote.startsWith('HTTP/1.1 401')).toBe(true)
-  const remoteWithToken = await rawGet(port, '192.168.1.10:8090', `/?token=${TOKEN}`)
-  expect(remoteWithToken.startsWith('HTTP/1.1 200')).toBe(true)
-  const remoteSessionToken = await rawGet(port, '192.168.1.10:8090', '/api/session-token')
-  expect(remoteSessionToken.startsWith('HTTP/1.1 403')).toBe(true)
-  // 回环地址照常免 token
-  const loopback = await rawGet(port, `127.0.0.1:${port}`, '/')
-  expect(loopback.startsWith('HTTP/1.1 200')).toBe(true)
+  const res = await rawGetResponse(port, `127.0.0.1:${port}`, '/')
+  expect(res.status).toBe(302)
+  expect(res.location).toBe(`/?token=${TOKEN}`)
+})
+
+test('带了 Authorization 头但没 token 时不重定向（避免把 token 回写给本地进程）', async () => {
+  const kit = makeHub()
+  const { port } = await makeServer(kit.hub)
+  const res = await rawGetResponse(port, `127.0.0.1:${port}`, '/', `Authorization: Bearer ${TOKEN}\r\n`)
+  expect(res.status).toBe(200) // 已鉴权，直接给页面
+  const wrong = await rawGetResponse(port, `127.0.0.1:${port}`, '/', 'Authorization: Bearer wrong\r\n')
+  expect(wrong.status).toBe(401) // 凭据错：401，绝不回写真 token
+  expect(wrong.location).toBeUndefined()
 })
 
 test('/api/state 返回 snapshot、pending 审批与登录态', async () => {

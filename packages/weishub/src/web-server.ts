@@ -93,37 +93,38 @@ export async function startWebServer(
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const path = url.pathname
     const hub = deps.hub
-    const host = req.headers.host ?? ''
-    const loopbackHost = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)
 
-    // 页面与静态资源免 token（浏览器直接打开即可），但仅限回环访问：
-    // 端口被转发到局域网/公网（Host 头不是回环）时，页面同样要求 token，避免把面板暴露出去。
-    const isPage = req.method === 'GET' && (path === '/' || path === '/index.html' || path === '/app.js')
+    // 鉴权先行：Bearer 头或 ?token= 查询参数任一命中即可。
+    // 页面、静态资源、API 一视同仁——面板地址由 weishub 启动时打印（带 token）并在浏览器自动打开。
     const authorized = req.headers.authorization === `Bearer ${deps.token}`
       || url.searchParams.get('token') === deps.token
-    if (isPage) {
-      if (!loopbackHost && !authorized) {
-        res.statusCode = 401
-        res.end()
-        return
-      }
-      return serveFile(res, path === '/app.js' ? 'app.js' : 'index.html')
-    }
-    // 面板脚本用：页面免 token 打开后，脚本向此端点取 token 再调 API。
-    // 必须在鉴权之前处理（否则无 token 取不到 token），且仅回环访问放行。
-    if (req.method === 'GET' && path === '/api/session-token') {
-      if (!loopbackHost) {
-        res.statusCode = 403
-        res.end()
-        return
-      }
-      return send(res, 200, { token: deps.token })
-    }
 
+    // 唯一放行的免鉴权入口：地址栏里**完全没有任何凭据**的根路径。
+    // 浏览器地址栏不会发 Bearer 头，所以这等价于「人手输了 localhost:8090」。
+    // 注意不能因为带了 Authorization 头就重定向——那会把 token 回写给任意本地进程。
     if (!authorized) {
+      // 只有裸根路径才补 token；/index.html 这类明确请求没凭据直接 401，
+      // 避免把重定向当成通用兜底。
+      const bareRoot = req.method === 'GET' && path === '/'
+        && url.searchParams.get('token') === null
+        && req.headers.authorization === undefined
+      if (bareRoot) {
+        // 重定向补 token：<script src> 不继承查询参数，页面必须自己带上才能让子资源通过鉴权
+        res.writeHead(302, { location: `/?token=${encodeURIComponent(deps.token)}` })
+        res.end()
+        return
+      }
       res.statusCode = 401
       res.end()
       return
+    }
+
+    // ---- 页面（静态） ----
+    if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
+      return serveFile(res, 'index.html')
+    }
+    if (req.method === 'GET' && path === '/app.js') {
+      return serveFile(res, 'app.js')
     }
 
     // ---- API ----

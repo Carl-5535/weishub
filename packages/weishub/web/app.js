@@ -1,20 +1,10 @@
-// 微枢本地面板：零依赖原生 JS。页面免 token 打开，脚本先向 /api/session-token 取 token，
-// 之后所有 API 调用带上它（URL 上仍可手工带 ?token= 覆盖，便于多实例调试）。
+// 微枢本地面板：零依赖原生 JS。面板地址由 weishub 启动时打印并在浏览器自动打开，
+// token 经 URL 的 ?token= 携带，所有请求复用同一参数。
 (() => {
   'use strict'
 
-  let token = new URLSearchParams(location.search).get('token') || ''
+  const token = new URLSearchParams(location.search).get('token') || ''
   const $ = (id) => document.getElementById(id)
-
-  async function loadToken() {
-    if (token !== '') return
-    try {
-      const res = await fetch('/api/session-token')
-      if (res.ok) token = (await res.json()).token || ''
-    } catch {
-      // 取不到就让后续请求以 401 暴露出来
-    }
-  }
 
   let state = null            // 最近一次 /api/state
   let selected = null         // 当前选中的 chatId
@@ -491,13 +481,10 @@
   $('ws-save').addEventListener('click', saveWorkspace)
   $('theme-toggle').addEventListener('click', toggleTheme)
 
-  // 先取 token 再开轮询：页面免 token 打开，token 由服务端下发
-  void loadToken().then(() => {
-    void refresh()
-    setInterval(refresh, 3000)
-    if (!qrTimerStarted) {
-      qrTimerStarted = true
-      setInterval(pollQr, 2000)
-    }
-  })
+  void refresh()
+  setInterval(refresh, 3000)
+  if (!qrTimerStarted) {
+    qrTimerStarted = true
+    setInterval(pollQr, 2000)
+  }
 })()
