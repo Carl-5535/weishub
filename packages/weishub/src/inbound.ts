@@ -48,6 +48,13 @@ import {
   type TaskResult,
 } from '@weishub/core'
 import { handleCommand, resolveSelection } from './commands.js'
+import {
+  CREDENTIAL_CHECK_INTERVAL_MS,
+  expiryView,
+  healthFromExpiry,
+  isCredentialRejection,
+  type CredentialHealth,
+} from './credential.js'
 
 export interface HubDeps {
   client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
@@ -167,6 +174,12 @@ export class Hub {
   #protocol: ILinkState | undefined
   /** 发件箱兜底重试定时器（stop 时清除） */
   #outboxRetryTimer: ReturnType<typeof setInterval> | undefined
+  /** 凭据健康检查定时器（stop 时清除） */
+  #credentialTimer: ReturnType<typeof setInterval> | undefined
+  /** 最近一次收到微信消息的时间（ISO）——收信即续期，是到期推算的锚点 */
+  #lastActivityAt: string | undefined
+  /** 服务端明确拒绝过凭据（重新扫码后清除） */
+  #credentialRejected: string | undefined
 
   constructor(deps: HubDeps) {
     this.#deps = deps
@@ -210,6 +223,57 @@ export class Hub {
   /** 是否已持有登录凭据（Web 面板登录态展示用）。 */
   get loggedIn(): boolean {
     return this.#credential !== undefined
+  }
+
+  /**
+   * 凭据健康度：本地按最近收信时间推算到期，并结合服务端是否拒绝过。
+   * 启动时与每 10 分钟各刷新一次（见 #startCredentialCheck）。
+   */
+  get credentialHealth(): CredentialHealth {
+    if (this.#credential === undefined) return { state: 'missing' }
+    if (this.#credentialRejected !== undefined) return { state: 'rejected', reason: this.#credentialRejected }
+    return healthFromExpiry(expiryView(this.#credential.savedAt, this.#lastActivityAt, Date.now()), Date.now())
+  }
+
+  /**
+   * 主动核实凭据是否仍被服务端接受。
+   * 用一个短超时的 getupdates 探测：失效 token 会立刻以鉴权错误返回；
+   * 有效 token 则会挂起（长轮询常态）——**超时即视为有效**，这正是我们要的信号。
+   */
+  async checkCredential(): Promise<CredentialHealth> {
+    if (this.#credential === undefined) return { state: 'missing' }
+    const local = this.credentialHealth
+    // 本地已判定被拒绝，无需再打扰服务端
+    if (local.state === 'rejected') return local
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 8_000)
+    try {
+      await this.#deps.client.poll(controller.signal)
+      // 拿到了一批消息（可能为空）：凭据有效
+      this.#credentialRejected = undefined
+      this.#lastActivityAt = new Date().toISOString()
+    } catch (error) {
+      // 探测超时 = 长轮询正常挂起 = 凭据被接受
+      const timedOut = controller.signal.aborted
+      if (!timedOut && isCredentialRejection(error) && !this.#stopped) {
+        this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
+        await this.#persistState().catch(() => undefined)
+      }
+      // 其余（网络抖动、超时）不改变结论
+    } finally {
+      clearTimeout(timer)
+    }
+    return this.credentialHealth
+  }
+
+  #startCredentialCheck(): void {
+    // 启动即查一次（不等第一个轮询周期）
+    void this.checkCredential().catch(() => undefined)
+    this.#credentialTimer = setInterval(() => {
+      if (this.#stopped) return
+      void this.checkCredential().catch(() => undefined)
+    }, CREDENTIAL_CHECK_INTERVAL_MS)
+    this.#credentialTimer.unref?.()
   }
 
   /** owner 白名单 id（Web 面板以 owner 身份注入消息用）。 */
@@ -284,13 +348,18 @@ export class Hub {
    * （start 时的「等待扫码」空转由此转为正式轮询）。返回是否已登录。
    */
   async reloadCredential(): Promise<boolean> {
-    if (this.#credential !== undefined) return true
     try {
-      this.#credential = await readCredential(defaultCredentialPath())
+      const fresh = await readCredential(defaultCredentialPath())
+      // 重新扫码拿到新凭据：清除「服务端拒绝过」的旧结论，并视为一次活动
+      this.#credential = fresh
+      this.#credentialRejected = undefined
+      this.#lastActivityAt = new Date().toISOString()
     } catch {
-      return false
+      return this.#credential !== undefined
     }
     if (!this.#stopped && !this.#loopStarted) this.#startLoop()
+    if (!this.#stopped && this.#credentialTimer === undefined) this.#startCredentialCheck()
+    await this.#persistState().catch(() => undefined)
     return true
   }
 
@@ -321,6 +390,7 @@ export class Hub {
     if (this.#credential !== undefined) this.#startLoop()
     await this.outbox.resumePending().catch(() => undefined)
     this.#startOutboxRetry()
+    if (this.#credential !== undefined) this.#startCredentialCheck()
   }
 
   /**
@@ -341,6 +411,7 @@ export class Hub {
   async stop(): Promise<void> {
     this.#stopped = true
     if (this.#outboxRetryTimer !== undefined) clearInterval(this.#outboxRetryTimer)
+    if (this.#credentialTimer !== undefined) clearInterval(this.#credentialTimer)
     // 关机先停任务：中止所有在跑 agent 进程树、丢弃队列（不执行新任务），再做收尾持久化
     this.dispatcher.stopAll()
     this.#pollAbort.abort()
@@ -387,6 +458,13 @@ export class Hub {
 
   /** 轮询循环每条消息的入口。 */
   async handleInbound(message: InboundMessage): Promise<void> {
+    // 收到微信消息 = 服务端已经接受了当前凭据，顺带续期（这也是过期推算的锚点）
+    const activityAt = new Date().toISOString()
+    const shouldPersistActivity = this.#lastActivityAt === undefined
+      || Date.parse(activityAt) - Date.parse(this.#lastActivityAt) > 60_000
+    this.#lastActivityAt = activityAt
+    this.#credentialRejected = undefined
+    if (shouldPersistActivity) void this.#persistState().catch(() => undefined)
     // 去重先于白名单：同一条消息重复推送无论发给谁都只算一次
     if (message.id !== '') {
       if (this.#seen.has(message.id)) return
@@ -585,6 +663,8 @@ export class Hub {
         workspace?: { global?: string; perAgent?: Record<string, string> }
         protocol?: unknown
         enabledAgent?: string
+        lastActivityAt?: string
+        credentialRejected?: string
       }>(defaultStatePath())
       for (const [chatId, binding] of Object.entries(state.chats ?? {})) {
         if (this.dispatcher.bind(chatId, binding.agentName) !== undefined && binding.sessionId !== undefined) {
@@ -600,6 +680,12 @@ export class Hub {
       // 唯一启用的 agent：只在仍可用时采用，否则由 getter 退回第一个已发现项
       if (typeof state.enabledAgent === 'string' && state.enabledAgent !== '') {
         this.#enabledAgent = state.enabledAgent
+      }
+      if (typeof state.lastActivityAt === 'string' && !Number.isNaN(Date.parse(state.lastActivityAt))) {
+        this.#lastActivityAt = state.lastActivityAt
+      }
+      if (typeof state.credentialRejected === 'string' && state.credentialRejected !== '') {
+        this.#credentialRejected = state.credentialRejected
       }
       // 工作目录覆盖：只接受合法形态，其余按无覆盖处理
       const saved = state.workspace
@@ -627,6 +713,8 @@ export class Hub {
         ...(this.#workspaceOverride.perAgent !== undefined ? { perAgent: this.#workspaceOverride.perAgent } : {}),
       },
       ...(this.enabledAgent !== undefined ? { enabledAgent: this.enabledAgent } : {}),
+      ...(this.#lastActivityAt !== undefined ? { lastActivityAt: this.#lastActivityAt } : {}),
+      ...(this.#credentialRejected !== undefined ? { credentialRejected: this.#credentialRejected } : {}),
       ...(this.#protocol !== undefined ? { protocol: this.#protocol } : {}),
     }
     const write = this.#persistChain.catch(() => undefined).then(async () => {

@@ -138,6 +138,7 @@ export async function startWebServer(
       }))
       return send(res, 200, {
         loggedIn: hub.loggedIn,
+        credential: hub.credentialHealth,
         agents: hub.agents.map((a) => ({
           name: a.name,
           enabled: a.name === hub.enabledAgent,

@@ -651,3 +651,68 @@ test('发件箱重试耗尽后，兜底定时器会再次尝试投递', async ()
     vi.useRealTimers()
   }
 })
+
+async function writeCredential(savedAt = new Date()): Promise<void> {
+  await writeFile(defaultCredentialPath(), JSON.stringify({
+    accountId: 'bot-1',
+    token: 'tok-cred',
+    apiBase: 'https://ilinkai.weixin.qq.com',
+    userId: 'owner-1',
+    savedAt: savedAt.toISOString(),
+  }), { mode: 0o600 })
+}
+
+test('凭据健康：刚写入的凭据为 ok', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  expect(kit.hub.credentialHealth.state).toBe('ok')
+})
+
+test('凭据健康：凭据已放 25 小时且无活动记录时为 expired', async () => {
+  await writeCredential(new Date(Date.now() - 25 * 3_600_000))
+  const kit = makeHub()
+  await kit.hub.start()
+  expect(kit.hub.credentialHealth.state).toBe('expired')
+})
+
+test('凭据健康：收信即续期——过期凭据收到消息后回到 ok', async () => {
+  await writeCredential(new Date(Date.now() - 25 * 3_600_000))
+  const kit = makeHub()
+  await kit.hub.start()
+  expect(kit.hub.credentialHealth.state).toBe('expired')
+  await kit.hub.handleInbound(msg({ text: '你好' }))
+  expect(kit.hub.credentialHealth.state).toBe('ok')
+})
+
+test('凭据健康：poll 报鉴权错时标记 rejected，重新扫码后清除', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  kit.client.poll = (async () => { throw new Error('微信 HTTP 401: unauthorized') }) as HubDeps['client']['poll']
+  const health = await kit.hub.checkCredential()
+  expect(health.state).toBe('rejected')
+  // 重新读取凭据（等价于重新扫码后落盘的新凭据）应清除拒绝状态
+  await kit.hub.reloadCredential()
+  expect(kit.hub.credentialHealth.state).not.toBe('rejected')
+})
+
+test('凭据健康：网络抖动不改变本地推算结论', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  kit.client.poll = (async () => { throw new Error('ECONNREFUSED') }) as HubDeps['client']['poll']
+  const health = await kit.hub.checkCredential()
+  expect(health.state).toBe('ok')
+})
+
+test('凭据健康：状态随 state.json 持久化', async () => {
+  await writeCredential(new Date(Date.now() - 10 * 3_600_000))
+  const kit = makeHub()
+  await kit.hub.start()
+  // 用一次真实收信刷新活动时间（checkCredential 的探测会挂起到超时，测试里不走那条路）
+  await kit.hub.handleInbound(msg({ text: '在吗' }))
+  const saved = JSON.parse(await readFile(join(homeDir, 'state.json'), 'utf8')) as { lastActivityAt?: string }
+  expect(typeof saved.lastActivityAt).toBe('string')
+  expect(Date.now() - Date.parse(saved.lastActivityAt!)).toBeLessThan(60_000)
+})

@@ -6,30 +6,31 @@
 <title>微枢</title>
 <style>
   :root {
-    color-scheme: light dark;
-    --ink: #14181d;
-    --slate: #5c6875;
-    --paper: #eef1f4;
-    --panel: #ffffff;
-    --brass: #a8621f;
-    --brass-soft: #f3e6d8;
-    --rule: #d3dae1;
+    color-scheme: light;
+    /* 浅色：暖纸底 + 墨黑文字 + Claude 橙，参考 claude.ai 的克制留白 */
+    --ink: #1f1e1d;
+    --slate: #6b6862;
+    --paper: #f5f4ef;
+    --panel: #fbfaf7;
+    --brass: #c15f3c;
+    --brass-soft: #f4e7e0;
+    --rule: #e3e0d8;
     --danger: #a8321f;
-    --ok: #1f6b45;
+    --ok: #3d7a52;
     --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --ink: #e6e9ec;
-      --slate: #97a2ae;
-      --paper: #14171a;
-      --panel: #1c2024;
-      --brass: #d9934e;
-      --brass-soft: #2e2419;
-      --rule: #30373e;
-      --danger: #e0705a;
-      --ok: #5cbf8e;
-    }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    /* 深色：暖炭黑而非纯黑，文字用暖白，避免常见的高对比冷黑 */
+    --ink: #edeae4;
+    --slate: #a09b92;
+    --paper: #1a1917;
+    --panel: #232220;
+    --brass: #e08d6b;
+    --brass-soft: #33251f;
+    --rule: #383530;
+    --danger: #e0705a;
+    --ok: #6fb98a;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -63,7 +64,9 @@
     background: var(--rule); flex: none;
   }
   .status-dot.on { background: var(--ok); }
+  .status-dot.warn { background: var(--brass); }
   .status-dot.off { background: var(--danger); }
+  .status-warn { color: var(--brass); }
   .status-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--slate); }
 
   button {
@@ -80,6 +83,11 @@
   button.quiet { border-color: transparent; background: transparent; color: var(--slate); padding: 4px 8px; }
   button.quiet:hover { color: var(--ink); border-color: var(--rule); }
   button:disabled { opacity: 0.45; cursor: default; }
+  .icon-btn {
+    border-color: transparent; background: transparent; color: var(--slate);
+    padding: 5px; display: grid; place-items: center; border-radius: 6px;
+  }
+  .icon-btn:hover { color: var(--ink); border-color: var(--rule); }
 
   /* 主体：左引擎架 + 右工作区 */
   .shell {
@@ -121,8 +129,9 @@
     background: color-mix(in srgb, var(--slate) 12%, transparent);
     color: var(--slate);
   }
+  /* 启用态：底色用极淡的品牌色衬底，图标保持厂商色（品牌识别优先于配色统一） */
   .engine[aria-pressed="true"] .glyph {
-    background: var(--brass); color: #fff;
+    background: color-mix(in srgb, currentColor 14%, transparent);
   }
   .engine .glyph svg { width: 19px; height: 19px; display: block; }
   .engine .label { min-width: 0; }
@@ -260,6 +269,12 @@
       <span id="login-dot" class="status-dot"></span>
       <span id="login-text">检查中</span>
     </div>
+    <button id="theme-toggle" class="icon-btn" title="切换深色/浅色" aria-label="切换深色或浅色主题">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.8v2.2M12 19v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.8 12H5M19 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/>
+      </svg>
+    </button>
     <button id="relogin" class="quiet">重新扫码</button>
   </header>
 

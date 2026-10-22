@@ -25,6 +25,9 @@ export function defaultStatePath(): string {
   return join(dataDir(), 'state.json')
 }
 
+/** iLink bot token 有效期（腾讯策略：约 24 小时；收到消息会自动续期）。 */
+export const CREDENTIAL_TTL_MS = 24 * 60 * 60 * 1000
+
 /** iLink 扫码登录换回的凭据。 */
 export interface StoredCredential {
   /** 机器人自己的 ilink 账号 id。 */
