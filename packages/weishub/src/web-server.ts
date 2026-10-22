@@ -90,23 +90,40 @@ export async function startWebServer(
   })
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // 鉴权先行：Bearer 头或 ?token= 查询参数任一命中即可，否则 401
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-    const authorized = req.headers.authorization === `Bearer ${deps.token}` || url.searchParams.get('token') === deps.token
+    const path = url.pathname
+    const hub = deps.hub
+    const host = req.headers.host ?? ''
+    const loopbackHost = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)
+
+    // 页面与静态资源免 token（浏览器直接打开即可），但仅限回环访问：
+    // 端口被转发到局域网/公网（Host 头不是回环）时，页面同样要求 token，避免把面板暴露出去。
+    const isPage = req.method === 'GET' && (path === '/' || path === '/index.html' || path === '/app.js')
+    const authorized = req.headers.authorization === `Bearer ${deps.token}`
+      || url.searchParams.get('token') === deps.token
+    if (isPage) {
+      if (!loopbackHost && !authorized) {
+        res.statusCode = 401
+        res.end()
+        return
+      }
+      return serveFile(res, path === '/app.js' ? 'app.js' : 'index.html')
+    }
+    // 面板脚本用：页面免 token 打开后，脚本向此端点取 token 再调 API。
+    // 必须在鉴权之前处理（否则无 token 取不到 token），且仅回环访问放行。
+    if (req.method === 'GET' && path === '/api/session-token') {
+      if (!loopbackHost) {
+        res.statusCode = 403
+        res.end()
+        return
+      }
+      return send(res, 200, { token: deps.token })
+    }
+
     if (!authorized) {
       res.statusCode = 401
       res.end()
       return
-    }
-    const path = url.pathname
-    const hub = deps.hub
-
-    // ---- 页面（静态，仅回环 + token） ----
-    if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
-      return serveFile(res, 'index.html')
-    }
-    if (req.method === 'GET' && path === '/app.js') {
-      return serveFile(res, 'app.js')
     }
 
     // ---- API ----

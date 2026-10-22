@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { connect } from 'node:net'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { InboundMessage } from '@weishub/channel-wechat'
 import { defaultCredentialPath, readCredential } from '@weishub/channel-wechat'
@@ -118,6 +119,19 @@ function makeHub(overrides: Partial<HubDeps> = {}): HubKit {
 
 const TOKEN = 'secret-token'
 
+/** 用原始 socket 发 GET，便于构造自定义 Host 头（fetch 不允许覆写）。 */
+function rawGet(port: number, hostHeader: string, path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nConnection: close\r\n\r\n`)
+    })
+    let buffer = ''
+    socket.on('data', (chunk) => { buffer += chunk })
+    socket.on('end', () => resolve(buffer))
+    socket.on('error', reject)
+  })
+}
+
 async function makeServer(hub: Hub, overrides: { fetch?: typeof globalThis.fetch } = {}) {
   const srv = await startWebServer({ hub, token: TOKEN, fetch: overrides.fetch })
   servers.push(srv)
@@ -144,14 +158,39 @@ async function putJson(url: string, path: string, body: unknown): Promise<Respon
   })
 }
 
-test('无 token 一律 401；query token 可作为浏览器形态的替代', async () => {
+test('页面与静态资源免 token；API 仍需 token', async () => {
   const kit = makeHub()
   const { url } = await makeServer(kit.hub)
+  // 页面免鉴权：浏览器直接打开即可
+  expect((await fetch(`${url}/`)).status).toBe(200)
+  expect((await fetch(`${url}/app.js`)).status).toBe(200)
+  // API 仍然要 token
   expect((await fetch(`${url}/api/state`)).status).toBe(401)
-  expect((await fetch(`${url}/`)).status).toBe(401)
   expect((await fetch(`${url}/api/state`, { headers: { authorization: 'Bearer wrong' } })).status).toBe(401)
   expect((await fetch(`${url}/api/state?token=${TOKEN}`)).status).toBe(200)
-  expect((await fetch(`${url}/?token=${TOKEN}`)).status).toBe(200)
+})
+
+test('/api/session-token 免 token 下发（回环），供页面脚本取用', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  const res = await fetch(`${url}/api/session-token`)
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual({ token: TOKEN })
+})
+
+test('非回环 Host 访问页面时仍要求 token（防止端口被转发后暴露面板）', async () => {
+  // fetch 不允许覆写 Host 头，改用原始 socket 构造请求
+  const kit = makeHub()
+  const { port } = await makeServer(kit.hub)
+  const remote = await rawGet(port, '192.168.1.10:8090', '/')
+  expect(remote.startsWith('HTTP/1.1 401')).toBe(true)
+  const remoteWithToken = await rawGet(port, '192.168.1.10:8090', `/?token=${TOKEN}`)
+  expect(remoteWithToken.startsWith('HTTP/1.1 200')).toBe(true)
+  const remoteSessionToken = await rawGet(port, '192.168.1.10:8090', '/api/session-token')
+  expect(remoteSessionToken.startsWith('HTTP/1.1 403')).toBe(true)
+  // 回环地址照常免 token
+  const loopback = await rawGet(port, `127.0.0.1:${port}`, '/')
+  expect(loopback.startsWith('HTTP/1.1 200')).toBe(true)
 })
 
 test('/api/state 返回 snapshot、pending 审批与登录态', async () => {

@@ -1,9 +1,20 @@
-// 微枢本地面板：零依赖原生 JS。token 经页面 URL 的 ?token= 携带，所有 API 调用复用同一参数。
+// 微枢本地面板：零依赖原生 JS。页面免 token 打开，脚本先向 /api/session-token 取 token，
+// 之后所有 API 调用带上它（URL 上仍可手工带 ?token= 覆盖，便于多实例调试）。
 (() => {
   'use strict'
 
-  const token = new URLSearchParams(location.search).get('token') || ''
+  let token = new URLSearchParams(location.search).get('token') || ''
   const $ = (id) => document.getElementById(id)
+
+  async function loadToken() {
+    if (token !== '') return
+    try {
+      const res = await fetch('/api/session-token')
+      if (res.ok) token = (await res.json()).token || ''
+    } catch {
+      // 取不到就让后续请求以 401 暴露出来
+    }
+  }
 
   let state = null            // 最近一次 /api/state
   let selected = null         // 当前选中的 chatId
@@ -80,14 +91,19 @@
 
   function render() {
     if (!state) return
-    $('login').hidden = state.loggedIn
+    const badge = $('login-badge')
+    badge.textContent = state.loggedIn ? '已登录' : '未登录'
+    badge.className = state.loggedIn ? 'badge' : 'badge busy'
+    $('logged-in').hidden = !state.loggedIn
     if (state.loggedIn) {
+      $('login').hidden = true
       qrActive = false
       renderChats()
       renderApprovals()
       renderWorkspace()
-    } else if (!qrActive) {
-      startQr()
+    } else {
+      $('login').hidden = false
+      if (!qrActive) startQr()
     }
   }
 
@@ -267,13 +283,23 @@
     qrActive = false
     startQr()
   })
+  // 已登录时也能重新扫码：显示扫码区并立刻取新二维码
+  $('relogin').addEventListener('click', () => {
+    $('logged-in').hidden = true
+    $('login').hidden = false
+    qrActive = false
+    startQr()
+  })
   $('send-form').addEventListener('submit', sendText)
   $('ws-save').addEventListener('click', saveWorkspace)
 
-  refresh()
-  setInterval(refresh, 3000)
-  if (!qrTimerStarted) {
-    qrTimerStarted = true
-    setInterval(pollQr, 2000)
-  }
+  // 先取 token 再开轮询：页面免 token 打开，token 由服务端下发
+  void loadToken().then(() => {
+    refresh()
+    setInterval(refresh, 3000)
+    if (!qrTimerStarted) {
+      qrTimerStarted = true
+      setInterval(pollQr, 2000)
+    }
+  })
 })()

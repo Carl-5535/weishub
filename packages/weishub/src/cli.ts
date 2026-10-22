@@ -32,6 +32,7 @@ import {
 } from '@weishub/channel-wechat'
 import { discoverAgents, loadAgentConfigs } from '@weishub/core'
 import { isEntrypoint } from './entrypoint.js'
+import { DEFAULT_NOTIFY_PORT, DEFAULT_WEB_PORT, readHubConfig, resolvePorts } from './config.js'
 import { buildHub, startServe, type ServeOptions } from './serve.js'
 import { startWebServer } from './web-server.js'
 
@@ -41,11 +42,14 @@ export function usage(): string {
     '  weishub [serve]                启动 hub + Web 面板（无凭据时先在面板扫码登录）',
     '  weishub login                  终端扫码登录后退出',
     '选项：',
-    '  --workspace <目录>             全局工作目录（默认 ~/weishub-workspace）',
+    '  --workspace <目录>             全局工作目录（默认取配置文件，否则 ~/weishub-workspace）',
     "  --agents-dir <目录>            agent 配置覆盖目录（默认 ~/.weishub/agents.d）",
-    '  --notify-port <端口>           notify API 固定端口（默认随机）',
-    '  --web-port <端口>              Web 面板固定端口（默认随机）',
+    `  --notify-port <端口>           notify API 端口（默认取配置文件，否则 ${DEFAULT_NOTIFY_PORT}）`,
+    `  --web-port <端口>              Web 面板端口（默认取配置文件，否则 ${DEFAULT_WEB_PORT}）`,
     '  --help                         显示本帮助',
+    '',
+    `配置文件：${join(dataDir(), 'config.json')}（{"webPort":8090,"notifyPort":8091,"workspace":"..."}）`,
+    '优先级：命令行参数 > 环境变量（WEISHUB_WEB_PORT/WEISHUB_NOTIFY_PORT）> 配置文件 > 内置默认',
   ].join('\n')
 }
 
@@ -238,11 +242,16 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
   let options: ServeOptions
   try {
-    options = {
-      workspace: stringValue(parsed.values.workspace),
-      agentsDir: stringValue(parsed.values['agents-dir']),
-      notifyPort: parsePort(stringValue(parsed.values['notify-port']), '--notify-port'),
+    const config = await readHubConfig()
+    const ports = resolvePorts(config, {
       webPort: parsePort(stringValue(parsed.values['web-port']), '--web-port'),
+      notifyPort: parsePort(stringValue(parsed.values['notify-port']), '--notify-port'),
+    })
+    options = {
+      workspace: stringValue(parsed.values.workspace) ?? config.workspace,
+      agentsDir: stringValue(parsed.values['agents-dir']) ?? config.agentsDir,
+      notifyPort: ports.notifyPort,
+      webPort: ports.webPort,
     }
   } catch (error) {
     process.stderr.write(`${(error as Error).message}\n`)
