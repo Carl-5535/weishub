@@ -71,7 +71,13 @@ export function validateAgentConfig(raw: unknown, file: string): AgentConfig {
   ) {
     errors.push(`字段 outputFormat 必须是 ${OUTPUT_FORMATS.map((f) => `"${f}"`).join(' / ')} 之一`)
   }
-  requireStringArray('resume')
+  // resume/resumeRun 都是可选；提供了就必须是字符串数组
+  if (obj.resume !== undefined && !isStringArray(obj.resume)) {
+    errors.push('字段 resume 必须是字符串数组')
+  }
+  if (obj.resumeRun !== undefined && !isStringArray(obj.resumeRun)) {
+    errors.push('字段 resumeRun 必须是字符串数组')
+  }
   if (
     obj.approval !== null &&
     !(typeof obj.approval === 'string' && (APPROVAL_MODES as readonly string[]).includes(obj.approval))

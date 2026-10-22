@@ -25,7 +25,15 @@ export async function runAgentTask(
   config: AgentConfig,
   options: RunOptions,
 ): Promise<TaskResult> {
-  const argv = config.run.map((arg) => arg.replaceAll('{{sessionId}}', options.sessionId ?? ''))
+  // 会话恢复：有 sessionId 时优先 resumeRun 整条替换，其次 resume 追加到 run 末尾（见 AgentConfig 注释）
+  const resuming = options.sessionId !== undefined
+  const template =
+    resuming && config.resumeRun !== undefined
+      ? config.resumeRun
+      : resuming && config.resume !== undefined
+        ? [...config.run, ...config.resume]
+        : config.run
+  const argv = template.map((arg) => arg.replaceAll('{{sessionId}}', options.sessionId ?? ''))
   argv.push(...config.permissionFlags[options.mode])
   if (config.approval === 'permission-prompt-tool' && options.approvalTool) {
     argv.push(

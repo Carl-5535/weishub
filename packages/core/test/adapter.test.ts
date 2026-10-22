@@ -231,3 +231,67 @@ test('sessionId 缺失时 {{sessionId}} 替换为空串', async () => {
   })
   expect(JSON.parse(result.text).argv).toContain('sid=')
 })
+
+// ---- 会话恢复接线（runAgentTask 消费 options.sessionId 的集成回归）----
+
+test('resume 追加式：sessionId 存在时真实 spawn 的 argv 末尾追加渲染后的 --resume <id>（claude 形态）', async () => {
+  const result = await runAgentTask(
+    {
+      ...baseConfig,
+      run: [process.execPath, '-e', dumpScript, '--', '-p', '--output-format', 'json'],
+      resume: ['--resume', '{{sessionId}}'],
+    },
+    { prompt: 'p', sessionId: 'sess-9', mode: 'auto', cwd: dir },
+  )
+  const argv = JSON.parse(result.text).argv as string[]
+  const i = argv.indexOf('--resume')
+  expect(i).toBeGreaterThan(-1)
+  expect(argv[i + 1]).toBe('sess-9')
+  expect(argv).toContain('--output-format')
+})
+
+test('resume 追加式：无 sessionId 时不追加 resume 参数，只用 run 模板', async () => {
+  const result = await runAgentTask(
+    {
+      ...baseConfig,
+      run: [process.execPath, '-e', dumpScript, '--', '-p'],
+      resume: ['--resume', '{{sessionId}}'],
+    },
+    { prompt: 'p', mode: 'auto', cwd: dir },
+  )
+  const argv = JSON.parse(result.text).argv as string[]
+  expect(argv).not.toContain('--resume')
+  expect(argv).toContain('-p')
+})
+
+test('resumeRun 整条替换：sessionId 存在时整个命令模板换成 resumeRun（codex 形态：exec resume <id> --json）', async () => {
+  const result = await runAgentTask(
+    {
+      ...baseConfig,
+      run: [process.execPath, '-e', dumpScript, '--', 'exec', '--json'],
+      resumeRun: [process.execPath, '-e', dumpScript, '--', 'exec', 'resume', '{{sessionId}}', '--json'],
+    },
+    { prompt: 'p', sessionId: 'sess-77', mode: 'auto', cwd: dir },
+  )
+  const argv = JSON.parse(result.text).argv as string[]
+  const i = argv.indexOf('resume')
+  expect(i).toBeGreaterThan(-1)
+  expect(argv.slice(i, i + 2)).toEqual(['resume', 'sess-77'])
+  // resumeRun 里的 --json 在，run 模板里的旧 argv 不在（整条替换而非追加）
+  expect(argv).toContain('--json')
+  expect(argv).not.toContain('sid=')
+})
+
+test('resumeRun 整条替换：无 sessionId 时仍用 run 模板，不触发 resumeRun', async () => {
+  const result = await runAgentTask(
+    {
+      ...baseConfig,
+      run: [process.execPath, '-e', dumpScript, '--', 'exec', '--json'],
+      resumeRun: [process.execPath, '-e', dumpScript, '--', 'exec', 'resume', '{{sessionId}}', '--json'],
+    },
+    { prompt: 'p', mode: 'auto', cwd: dir },
+  )
+  const argv = JSON.parse(result.text).argv as string[]
+  expect(argv).not.toContain('resume')
+  expect(argv).toContain('--json')
+})

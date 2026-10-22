@@ -48,7 +48,9 @@ test('内置配置包含 codex，关键字段与既定值一致', async () => {
   expect(codex!.passVia).toBe('stdin')
   expect(codex!.outputFormat).toBe('codex-jsonl')
   expect(codex!.approval).toBe('app-server')
-  expect(codex!.resume).toEqual(['exec', 'resume', '{{sessionId}}'])
+  // codex 的 resume 是独立子命令：走 resumeRun 整条替换，不再有追加式 resume
+  expect(codex!.resume).toBeUndefined()
+  expect(codex!.resumeRun).toEqual(['codex', 'exec', 'resume', '{{sessionId}}', '--json'])
   expect(codex!.timeoutSec).toBe(1800)
 })
 
@@ -64,10 +66,16 @@ test('内置配置包含 dsh 与 pi，且 $note 注释键被剥离', async () =>
   expect(dsh.run).toEqual(['dsh', 'agent', 'run'])
   expect(dsh.outputFormat).toBe('text')
   expect(dsh.approval).toBeNull()
+  // dsh headless 支持 --session-id <id>（flag 式）：追加式 resume
+  expect(dsh.resume).toEqual(['--session-id', '{{sessionId}}'])
+  expect(dsh.resumeRun).toBeUndefined()
   const pi = configs.find((c) => c.name === 'pi')!
   expect(pi.run).toEqual(['pi'])
   expect(pi.outputFormat).toBe('text')
   expect(pi.approval).toBeNull()
+  // pi v1 无已知的会话恢复入口：不带 resume/resumeRun
+  expect(pi.resume).toBeUndefined()
+  expect(pi.resumeRun).toBeUndefined()
 })
 
 test('extraDir 同名条目逐字段覆盖，异名追加，顺序内置在前', async () => {
@@ -133,6 +141,39 @@ test('非法字段抛中文错误且指明文件与字段', async () => {
   expect((err as Error).message).toContain('detect')
   expect((err as Error).message).toContain('run')
   expect((err as Error).message).toContain('timeoutSec')
+})
+
+test('resume/resumeRun 均可省略（不支持会话恢复的 agent），resumeRun 非数组时报错', async () => {
+  await writeFile(
+    join(extraDir, 'nores.json'),
+    JSON.stringify({
+      name: 'nores',
+      detect: 'nores',
+      run: ['nores'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const configs = await loadAgentConfigs(extraDir)
+  expect(configs.find((c) => c.name === 'nores')!.resume).toBeUndefined()
+  await writeFile(
+    join(extraDir, 'badrun.json'),
+    JSON.stringify({
+      name: 'badrun',
+      detect: 'badrun',
+      run: ['badrun'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      resumeRun: 'codex exec resume',
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  await expect(loadAgentConfigs(extraDir)).rejects.toThrow(/badrun\.json.*resumeRun/)
 })
 
 test('outputFormat 非法值抛中文错误', async () => {
