@@ -126,8 +126,6 @@ export class Hub {
   readonly #seen = new Set<string>()
   /** 有挂起审批时收到的普通文本：在该 chat 的下一条回复末尾附提醒 */
   readonly #reminders = new Map<string, number>()
-  /** prompt → chatId：run 包装器据此为审批桥注入 WEISHUB_CHAT_ID（覆盖立即与排队两种执行） */
-  readonly #promptChats = new Map<string, string>()
   #credential: StoredCredential | undefined
   #notify: { port: number; close(): Promise<void> } | undefined
   #lock: HubLock | undefined
@@ -197,6 +195,8 @@ export class Hub {
     this.#stopped = true
     this.#pollAbort.abort()
     await this.#persistChain.catch(() => undefined)
+    // 关机尾写：把最终状态（含最后一条投递触发的断点推进）落盘后再释放资源
+    await this.#persistState().catch(() => undefined)
     if (this.#notify !== undefined) {
       const notify = this.#notify
       this.#notify = undefined
@@ -239,9 +239,10 @@ export class Hub {
     if (pendings.length > 0) {
       const verdict = classifyApprovalReply(text)
       if (verdict === 'allow' || verdict === 'deny') {
-        for (const pending of pendings) this.approvals.resolve(pending.id, verdict)
-        const verb = verdict === 'allow' ? '已允许' : '已拒绝'
-        await this.#reply(message.chatId, `${verb}（${pendings.length} 项审批）`)
+        // 只决议最老的一条：一条「同意」对应一个挂起请求，避免误放行后续请求
+        const oldest = pendings.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b))
+        this.approvals.resolve(oldest.id, verdict)
+        await this.#reply(message.chatId, verdict === 'allow' ? '已允许' : '已拒绝')
         return
       }
       if (verdict === 'web') {
@@ -291,10 +292,8 @@ export class Hub {
       await this.#reply(message.chatId, `已绑定 agent「${first.name}」，直接发消息即可开始。`)
     }
 
-    this.#promptChats.set(prompt, message.chatId)
     const outcome = this.dispatcher.submit(message.chatId, prompt)
     if (outcome === 'rejected-busy') {
-      this.#promptChats.delete(prompt)
       await this.#reply(message.chatId, '任务队列已满，请稍后再试')
     }
   }
@@ -312,8 +311,7 @@ export class Hub {
   #makeRun(): typeof runAgentTask {
     const realRun = this.#deps.run ?? runAgentTask
     return async (config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
-      const chatId = this.#promptChats.get(options.prompt)
-      this.#promptChats.delete(options.prompt)
+      const chatId = options.chatId
       let serverConfigPath: string | undefined
       let approvalTool: RunOptions['approvalTool']
       if (config.approval === 'permission-prompt-tool' && options.mode === 'auto' && chatId !== undefined) {

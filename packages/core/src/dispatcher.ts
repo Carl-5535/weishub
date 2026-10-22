@@ -131,6 +131,7 @@ export class ChatDispatcher {
       prompt: text,
       mode: this.modeOf(chatId),
       cwd: this.deps.cwdFor(state.binding.agentName),
+      chatId,
       signal: state.abort.signal,
     }
     if (state.binding.sessionId !== undefined) options.sessionId = state.binding.sessionId

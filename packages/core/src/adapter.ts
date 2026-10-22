@@ -7,6 +7,8 @@ export interface RunOptions {
   sessionId?: string
   mode: PermissionMode
   cwd: string
+  /** 发起任务的会话 id，纯透传（审批桥据此注入 WEISHUB_CHAT_ID）；runAgentTask 不做逻辑 */
+  chatId?: string
   /** 存在且 config.approval === 'permission-prompt-tool' 时，追加 --mcp-config / --permission-prompt-tool */
   approvalTool?: { serverConfigPath: string; toolName: string }
   signal?: AbortSignal

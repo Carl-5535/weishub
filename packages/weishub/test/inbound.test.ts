@@ -256,6 +256,30 @@ test('入站媒体落盘 workspace 并在 prompt 末尾追加 [附件] 行；med
   expect(kit.sent.map((s) => s.text).join('\n')).toContain('接收失败') // 回复中备注
 })
 
+test('一条「同意」只决议最老的一条挂起审批', async () => {
+  const { hub, calls } = makeHub()
+  const first = hub.approvals.startRequest('owner-1', 'Bash', '{"n":1}')
+  const second = hub.approvals.startRequest('owner-1', 'Bash', '{"n":2}')
+  await hub.handleInbound(msg({ text: '同意' }))
+  expect(await first.done).toBe('allow')
+  expect(hub.approvals.resultOf(second.id)).toBe('pending') // 较新的不受影响
+  expect(calls).toHaveLength(0)
+  // 第二条独立决议
+  await hub.handleInbound(msg({ text: '拒绝' }))
+  expect(await second.done).toBe('deny')
+})
+
+test('两个聊天提交相同提示文本：chatId 各自透传到 run（审批桥 env 各自正确）', async () => {
+  const kit = makeHub(undefined, async () => ({ text: 'done', exitCode: 0 }))
+  await kit.hub.handleInbound(msg({ id: 'c-a', chatId: 'room-a', text: '同一段提示' }))
+  await kit.hub.handleInbound(msg({ id: 'c-b', chatId: 'room-b', text: '同一段提示' }))
+  await vi.waitFor(() => expect(kit.calls).toHaveLength(2))
+  const promptByChat = new Map(kit.calls.map((c) => [c.options.chatId, c.options.prompt]))
+  expect(promptByChat.get('room-a')).toBe('同一段提示')
+  expect(promptByChat.get('room-b')).toBe('同一段提示')
+  await drain(kit.hub)
+})
+
 test('轮询循环（tick）异常不退出循环', async () => {
   const kit = makeHub()
   kit.client.poll.mockImplementationOnce(async () => {
