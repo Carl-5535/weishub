@@ -76,14 +76,30 @@ export function formatRemaining(remainingMs: number): string {
 }
 
 /**
+ * iLink 的凭据失效错误码。服务端以 HTTP 200 + `errcode` 返回，
+ * 这不走 HTTP 状态码，因此必须从错误文案里的 errcode 识别。
+ * -14 = session timeout（token 过期/被顶掉，实测最常遇到）
+ */
+const CREDENTIAL_ERRCODES = new Set([-14, -1])
+
+/**
  * 从通道错误里识别「凭据被服务端拒绝」。
- * iLink 对失效 token 的拒绝形式不止一种，宁可宽一点：
- * 鉴权类 HTTP 状态、以及错误文案里出现 token/凭证/登录失效等关键词。
+ * iLink 有两套表达：鉴权类 HTTP 状态，以及 HTTP 200 + errcode。
+ * 后者最容易被漏掉——`getupdates 失败 (ret=0, errcode=-14): session timeout`
+ * 里既没有 401 也没有 token 字样，只能靠 errcode 认。
  */
 export function isCredentialRejection(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
+  // 1) HTTP 状态码形式
   if (/\b(401|403)\b/.test(message)) return true
-  return /(token|凭证|凭据|登录失效|未登录|unauthor|credential)/i.test(message)
+  // 2) iLink errcode 形式（服务端用 200 包着错误码返回）
+  const errcode = /errcode=(-?\d+)/.exec(message)
+  if (errcode !== null && CREDENTIAL_ERRCODES.has(Number(errcode[1]))) return true
+  // 3) 文案形式（各家措辞不一，宁可宽一点）
+  if (/(token|凭证|凭据|登录失效|未登录|unauthor|credential)/i.test(message)) return true
+  // 4) 会话失效的文案（iLink 用 session timeout 表示 token 过期）
+  if (/session\s*(timeout|expired|invalid)/i.test(message)) return true
+  return false
 }
 
 /** 面向用户的提示文案。 */

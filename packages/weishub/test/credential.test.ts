@@ -66,6 +66,18 @@ describe('isCredentialRejection', () => {
     expect(isCredentialRejection(new Error('凭据无效，请重新登录'))).toBe(true)
   })
 
+  test('识别 iLink 的 errcode 形式（HTTP 200 包着错误码，实测返回）', () => {
+    // 真实响应：HTTP 200 + {"errcode":-14,"errmsg":"session timeout"}
+    // 经 ilink 的 #assertSuccess 包装后长这样：
+    expect(isCredentialRejection(new Error('getupdates 失败 (ret=0, errcode=-14): session timeout'))).toBe(true)
+    expect(isCredentialRejection(new Error('sendmessage 失败 (ret=0, errcode=-14): session timeout'))).toBe(true)
+  })
+
+  test('其他 errcode 不算凭据问题', () => {
+    expect(isCredentialRejection(new Error('sendmessage 失败 (ret=0, errcode=-2): invalid param'))).toBe(false)
+    expect(isCredentialRejection(new Error('getupdates 失败 (ret=0, errcode=-500): system busy'))).toBe(false)
+  })
+
   test('网络类错误不算凭据被拒', () => {
     expect(isCredentialRejection(new Error('ECONNREFUSED'))).toBe(false)
     expect(isCredentialRejection(new Error('The operation was aborted'))).toBe(false)
@@ -95,4 +107,19 @@ describe('文案', () => {
       expect(message).toMatch(/微信|凭据/)
     }
   })
+})
+
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+test('真实服务端响应样本：errcode=-14 被判为凭据失效', async () => {
+  // 这条 fixture 来自 2026-10-22 对本机过期 token 的实际探测：
+  // HTTP 200 + {"errcode":-14,"errmsg":"session timeout"}，200ms 返回（不是超时）
+  const path = join(fileURLToPath(new URL('./fixtures/ilink-session-timeout.json', import.meta.url)))
+  const raw = JSON.parse(await readFile(path, 'utf8')) as { errcode: number; errmsg: string }
+  expect(raw.errcode).toBe(-14)
+  // 模拟 ILinkClient.#assertSuccess 的包装
+  const wrapped = new Error(`getupdates 失败 (ret=${raw.errcode === -14 ? 0 : raw.errcode}, errcode=${raw.errcode}): ${raw.errmsg}`)
+  expect(isCredentialRejection(wrapped)).toBe(true)
 })

@@ -267,8 +267,14 @@ export class Hub {
   }
 
   #startCredentialCheck(): void {
-    // 启动即查一次（不等第一个轮询周期）
-    void this.checkCredential().catch(() => undefined)
+    // 启动即查一次（不等第一个轮询周期），失效时在终端明确告知——用户不看面板也能知道
+    void this.checkCredential().then((health) => {
+      if (health.state === 'rejected') {
+        process.stderr.write(`微枢：微信凭据已失效（${health.reason}），请重新扫码登录\n`)
+      } else if (health.state === 'expired') {
+        process.stderr.write('微枢：微信凭据已过期，主动推送将失败；发一条消息即可续期\n')
+      }
+    }).catch(() => undefined)
     this.#credentialTimer = setInterval(() => {
       if (this.#stopped) return
       void this.checkCredential().catch(() => undefined)
@@ -310,6 +316,26 @@ export class Hub {
       this.dispatcher.bind(chatId, name)
     }
     await this.#persistState()
+  }
+
+  /**
+   * 主动推送的统一出口：成功即证明凭据有效（顺带续期），
+   * 鉴权失败则立刻标记，让面板/状态如实反映——否则用户只会看到「发送失败」却不知原因。
+   */
+  async #sendOutbound(send: () => Promise<void>): Promise<void> {
+    try {
+      await send()
+      if (this.#credentialRejected !== undefined) {
+        this.#credentialRejected = undefined
+        await this.#persistState().catch(() => undefined)
+      }
+    } catch (error) {
+      if (isCredentialRejection(error) && this.#credentialRejected === undefined) {
+        this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
+        await this.#persistState().catch(() => undefined)
+      }
+      throw error
+    }
   }
 
   /** 当前工作目录配置（global 为生效默认值，perAgent 为覆盖表）。 */
@@ -380,8 +406,8 @@ export class Hub {
     this.#notify = await startNotifyApi({
       token: this.#notifyToken,
       ownerChatId: this.#deps.ownerUserId,
-      sendText: (text) => this.#deps.client.sendText(this.#deps.ownerUserId, text),
-      sendImage: (name, bytes) => this.#deps.client.sendMedia(this.#deps.ownerUserId, name, bytes),
+      sendText: (text) => this.#sendOutbound(() => this.#deps.client.sendText(this.#deps.ownerUserId, text)),
+      sendImage: (name, bytes) => this.#sendOutbound(() => this.#deps.client.sendMedia(this.#deps.ownerUserId, name, bytes)),
       outbox: this.outbox,
       approvals: this.approvals,
       getLoggedIn: () => this.#credential !== undefined,
@@ -734,10 +760,24 @@ export class Hub {
       while (!this.#stopped) {
         try {
           await this.#pollOnce()
-        } catch {
+          // 一次成功的轮询说明凭据被接受；若此前标记过拒绝，这里清除
+          if (this.#credentialRejected !== undefined) {
+            this.#credentialRejected = undefined
+            await this.#persistState().catch(() => undefined)
+          }
+        } catch (error) {
           if (this.#stopped) return
+          // 鉴权失败必须让状态可见，否则只是无限退避重试、面板一直显示「已连接」
+          if (isCredentialRejection(error) && this.#credentialRejected === undefined) {
+            this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
+            await this.#persistState().catch(() => undefined)
+            // 首次发现失效时吼一声，便于在不看面板时也知道
+            process.stderr.write(`微枢：微信凭据已失效（${this.#credentialRejected}），请重新扫码\n`)
+          }
           await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, POLL_BACKOFF_MS)
+            // 凭据已失效时不必每 3 秒重试一次：降频到 1 分钟，等用户重新扫码
+            const wait = this.#credentialRejected !== undefined ? CREDENTIAL_CHECK_INTERVAL_MS : POLL_BACKOFF_MS
+            const timer = setTimeout(resolve, wait)
             timer.unref?.()
           })
         }
