@@ -35,6 +35,11 @@ export async function runAgentTask(
   }
 
   return await new Promise<TaskResult>((resolve, reject) => {
+    // 已中止的 signal 不会再触发 abort 事件（WHATWG 规范），spawn 前先查一次
+    if (options.signal?.aborted) {
+      reject(new Error('agent 执行被中止（外部 signal abort）'))
+      return
+    }
     const child = spawn(argv[0], argv.slice(1), {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -62,6 +67,11 @@ export async function runAgentTask(
         : undefined
     const onAbort = () => fail(new Error('agent 执行被中止（外部 signal abort）'))
     options.signal?.addEventListener('abort', onAbort, { once: true })
+    // 消除注册前的中止竞态窗口：spawn 与 addEventListener 之间已中止则立即终止
+    if (options.signal?.aborted) {
+      fail(new Error('agent 执行被中止（外部 signal abort）'))
+      return
+    }
 
     function fail(err: Error): void {
       if (settled) return

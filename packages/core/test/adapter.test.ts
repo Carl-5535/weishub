@@ -182,6 +182,31 @@ test('外部 signal abort 立即终止', async () => {
   expect(Date.now() - startedAt).toBeLessThan(5000)
 })
 
+test('已中止的 signal：立即拒绝且子进程未启动', async () => {
+  const marker = join(dir, 'started.marker')
+  // 假 agent 启动即写标记文件；若进程真的被 spawn 则标记存在
+  const script = `
+const fs = require('fs')
+fs.writeFileSync(process.argv[1], '1')
+setTimeout(() => {}, 10000)
+`
+  const cfg: AgentConfig = {
+    ...baseConfig,
+    timeoutSec: 30,
+    run: [process.execPath, '-e', script, '--', marker],
+  }
+  const ac = new AbortController()
+  ac.abort() // 传入前就已中止
+  const startedAt = Date.now()
+  await expect(
+    runAgentTask(cfg, { prompt: 'p', mode: 'auto', cwd: dir, signal: ac.signal }),
+  ).rejects.toThrow(/中止|abort/i)
+  expect(Date.now() - startedAt).toBeLessThan(2000)
+  // 给可能存在的子进程留缓冲，再断言从未启动
+  await new Promise((r) => setTimeout(r, 300))
+  await expect(readFile(marker, 'utf8')).rejects.toThrow(/ENOENT/)
+})
+
 test('非零退出码抛含 stderr 摘要的中文错误', async () => {
   const script = `process.stderr.write('boom 内部错误'); process.exit(3)`
   const cfg: AgentConfig = {
