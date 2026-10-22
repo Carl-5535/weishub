@@ -9,9 +9,14 @@
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "weishub": "packages/weishub/lib/cli.js",
+    "wx": "packages/weishub/lib/wx.js"
+  },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -b packages/channel-wechat packages/core packages/weishub"
+    "typecheck": "tsc -b packages/channel-wechat packages/core packages/weishub",
+    "build": "tsc -b packages/channel-wechat packages/core packages/weishub"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

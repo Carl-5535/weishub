@@ -5,6 +5,7 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "bin": {
+    "weishub": "lib/cli.js",
     "wx": "lib/wx.js"
   },
   "exports": {
