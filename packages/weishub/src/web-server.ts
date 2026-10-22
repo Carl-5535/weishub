@@ -121,7 +121,7 @@ export async function startWebServer(
 
     // ---- 页面（静态） ----
     if (req.method === 'GET' && (path === '/' || path === '/index.html')) {
-      return serveFile(res, 'index.html')
+      return servePage(res)
     }
     if (req.method === 'GET' && path === '/app.js') {
       return serveFile(res, 'app.js')
@@ -268,6 +268,30 @@ export async function startWebServer(
       const type = CONTENT_TYPES[name.slice(name.lastIndexOf('.'))] ?? 'application/octet-stream'
       res.writeHead(200, { 'content-type': type, 'content-length': content.length })
       res.end(content)
+    } catch {
+      send(res, 404, { error: '未找到' })
+    }
+  }
+
+  /**
+   * 返回面板 HTML，并把 token 注入<script src>。
+   * 浏览器对子资源请求**不会**继承页面的查询参数，`<script src="app.js">`
+   * 必然被 401 拦掉、整个脚本不执行、页面成空壳——所以必须在服务端补上。
+   */
+  async function servePage(res: ServerResponse): Promise<void> {
+    try {
+      const html = await readFile(join(WEB_DIR, 'index.html'), 'utf8')
+      const token = encodeURIComponent(deps.token)
+      const body = html.replace(
+        '<script src="app.js"></script>',
+        `<script src="app.js?token=${token}"></script>`,
+      )
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+        'cache-control': 'no-store',
+      })
+      res.end(body)
     } catch {
       send(res, 404, { error: '未找到' })
     }

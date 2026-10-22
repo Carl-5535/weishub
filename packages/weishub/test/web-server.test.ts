@@ -396,3 +396,17 @@ test('启用的 agent 持久化：重启后仍是同一个', async () => {
   const saved = JSON.parse(await readFile(join(homeDir, 'state.json'), 'utf8')) as { enabledAgent?: string }
   expect(saved.enabledAgent).toBe('codex')
 })
+
+test('页面返回的 HTML 里 script src 带上了 token（浏览器子资源不继承查询参数）', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  const res = await fetch(`${url}/?token=${TOKEN}`)
+  const html = await res.text()
+  // 关键：<script src> 必须自带 token，否则 app.js 会被 401 拦掉、整页成空壳
+  expect(html).toContain(`<script src="app.js?token=${TOKEN}"></script>`)
+  expect(html).not.toContain('<script src="app.js"></script>')
+  // 该脚本地址确实可用
+  expect((await fetch(`${url}/app.js?token=${TOKEN}`)).status).toBe(200)
+  // 不许缓存：token 变了页面必须跟着变
+  expect(res.headers.get('cache-control')).toBe('no-store')
+})
