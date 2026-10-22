@@ -224,6 +224,53 @@ describe('Outbox', () => {
     expect(outbox.pending()).toEqual({})
   })
 
+  it('sendFile 阻塞期间 enqueue 的文本不会被卡住（外层重扫回归）', async () => {
+    const sent: string[] = []
+    const filesSent: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const outbox = new Outbox({
+      send: async (_chatId, text) => { sent.push(text) },
+      sendFile: async (_chatId, path) => {
+        filesSent.push(path)
+        await gate
+      },
+      maxChars: 10,
+      retryDelayMs: 1,
+    })
+    outbox.enqueue('c1', '正文', ['a.pdf'])
+    await flush()
+    expect(sent).toEqual(['正文'])
+    // 文件发送在途时追加文本：投递循环必须回头补发，不能卡在 files 阶段
+    outbox.enqueue('c1', '追加')
+    release()
+    await outbox.resumePending()
+    expect(sent).toEqual(['正文', '追加'])
+    expect(filesSent).toEqual(['a.pdf'])
+    expect(outbox.pending()).toEqual({})
+  })
+
+  it('load 拒绝非法快照（断点越界/类型不符抛中文错误）', () => {
+    const outbox = new Outbox({
+      send: async () => {},
+      sendFile: async () => {},
+      maxChars: 10,
+      retryDelayMs: 1,
+    })
+    expect(() => outbox.load({ c1: { chunks: ['a'], files: [], next: 5, nextFile: 0 } }))
+      .toThrow('outbox.c1.next 无效')
+    expect(() => outbox.load({ c1: { chunks: ['a'], files: [], next: -1, nextFile: 0 } }))
+      .toThrow('outbox.c1.next 无效')
+    expect(() => outbox.load({ c1: { chunks: ['a'], files: [], next: 0.5, nextFile: 0 } }))
+      .toThrow('outbox.c1.next 无效')
+    expect(() => outbox.load({ c1: { chunks: ['a'], files: ['f'], next: 0, nextFile: 3 } }))
+      .toThrow('outbox.c1.nextFile 无效')
+    expect(() => outbox.load({ c1: { chunks: ['a', 42 as unknown as string], files: [], next: 0, nextFile: 0 } }))
+      .toThrow('outbox.c1.chunks 必须是字符串数组')
+    expect(() => outbox.load({ c1: { chunks: ['a'], files: [null as unknown as string], next: 0, nextFile: 0 } }))
+      .toThrow('outbox.c1.files 必须是字符串数组')
+  })
+
   it('默认重试参数为 maxRetries=3、retryDelayMs=2000', async () => {
     vi.useFakeTimers()
     try {

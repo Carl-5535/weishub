@@ -101,8 +101,24 @@ export class Outbox {
     return snapshot
   }
 
-  /** 载入断点快照（如进程重启后从持久化存储恢复），替换当前发件箱内容。 */
+  /** 载入断点快照（如进程重启后从持久化存储恢复），替换当前发件箱内容。校验规则对齐前身 state.ts。 */
   load(snapshot: Record<string, OutboxItem>): void {
+    for (const [chatId, item] of Object.entries(snapshot)) {
+      const chunks = item.chunks
+      if (!Array.isArray(chunks) || chunks.some(chunk => typeof chunk !== 'string')) {
+        throw new Error(`outbox.${chatId}.chunks 必须是字符串数组`)
+      }
+      const files = item.files
+      if (!Array.isArray(files) || files.some(file => typeof file !== 'string')) {
+        throw new Error(`outbox.${chatId}.files 必须是字符串数组`)
+      }
+      if (!Number.isInteger(item.next) || item.next < 0 || item.next > chunks.length) {
+        throw new Error(`outbox.${chatId}.next 无效`)
+      }
+      if (!Number.isInteger(item.nextFile) || item.nextFile < 0 || item.nextFile > files.length) {
+        throw new Error(`outbox.${chatId}.nextFile 无效`)
+      }
+    }
     this.#items.clear()
     for (const [chatId, item] of Object.entries(snapshot)) {
       this.#items.set(chatId, {
@@ -132,26 +148,41 @@ export class Outbox {
     return run
   }
 
-  /** 单 chat 串行投递循环：先送完全部文本块，再按序送文件；失败耗尽重试即停在断点。 */
+  /**
+   * 单 chat 串行投递循环：先送完全部文本块，再按序送文件；失败耗尽重试即停在断点。
+   * 两段包在外层重扫循环里：files 在途（含退避窗口）期间 enqueue 追加的文本块
+   * 会被回头补发，不会卡死在 files 阶段；load() 换掉条目时改送新条目。
+   */
   async #drain(chatId: string): Promise<void> {
-    const item = this.#items.get(chatId)
-    if (item === undefined) return
-    while (item.next < item.chunks.length) {
-      const delivered = await this.#deliverWithRetry(() => this.#send(chatId, item.chunks[item.next]!))
-      if (!delivered) return // 重试耗尽：保留断点，绝不丢弃
-      item.next += 1
-    }
-    while (item.nextFile < item.files.length) {
-      const delivered = await this.#deliverWithRetry(() => this.#sendFile(chatId, item.files[item.nextFile]!))
-      if (!delivered) return
-      item.nextFile += 1
-    }
-    // 全部送达才移除条目：中途崩溃后 resumePending 会续发，代价是极端情况下的重复，换来绝不丢失。
-    if (item.next === item.chunks.length && item.nextFile === item.files.length && this.#items.get(chatId) === item) {
+    const initial = this.#items.get(chatId)
+    if (initial === undefined) return
+    let item = initial
+    for (;;) {
+      while (item.next < item.chunks.length) {
+        const delivered = await this.#deliverWithRetry(() => this.#send(chatId, item.chunks[item.next]!))
+        if (!delivered) return // 重试耗尽：保留断点，绝不丢弃
+        item.next += 1
+      }
+      while (item.nextFile < item.files.length) {
+        const delivered = await this.#deliverWithRetry(() => this.#sendFile(chatId, item.files[item.nextFile]!))
+        if (!delivered) return
+        item.nextFile += 1
+      }
+      // 两段都到头仍不完整：说明投递期间 enqueue 追加了新内容，回头重扫
+      if (item.next < item.chunks.length || item.nextFile < item.files.length) continue
+      // 全部送达才移除条目：中途崩溃后 resumePending 会续发，代价是极端情况下的重复，换来绝不丢失。
+      if (this.#items.get(chatId) !== item) {
+        // load() 在投递中换掉了条目：改送新条目，避免误删或漏发
+        const replaced = this.#items.get(chatId)
+        if (replaced === undefined) return
+        item = replaced
+        continue
+      }
       this.#items.delete(chatId)
       if (this.#items.size === 0) {
         for (const cb of this.#emptyCallbacks) cb()
       }
+      return
     }
   }
 
