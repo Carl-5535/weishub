@@ -1,0 +1,5 @@
+# NOTE: 事件结构为真实捕获（codex-cli 0.163.0，thread.started 为原样 stdout）。但 agent_message 与 turn.completed 两行为按官方文档手写——执行机配置的 zhipu provider 不支持 responses API，真实运行以 turn.failed 结束，未取得成功输出。此两行字段未经真实成功输出验证。
+{"type":"thread.started","thread_id":"01a161ad-f035-74e0-b132-5d1d0541ff2e"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ok"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}
