@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -415,4 +415,31 @@ test('start：无凭据进入等待扫码状态——notify api 在、不轮询'
   await kit.hub.start()
   expect(kit.hub.notifyPort).toBeGreaterThan(0)
   expect(kit.client.poll).not.toHaveBeenCalled()
+})
+
+test('/sessions 后回复裸数字：绑定会话而非当作提示词或命令', async () => {
+  const store = await mkdtemp(join(tmpdir(), 'weishub-sessions-'))
+  tempDirs.push(store)
+  const sessionId = 'fake-session-0001'
+  // claude 存储布局：<store>/<项目目录>/<sessionId>.jsonl
+  const projectDir = join(store, 'proj')
+  await mkdir(projectDir, { recursive: true })
+  await writeFile(
+    join(projectDir, `${sessionId}.jsonl`),
+    '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"历史会话标题"}]}}\n',
+  )
+  const agentWithStore: AgentConfig = { ...agentClaude, listSessions: { store, kind: 'claude' } }
+  const kit = makeHub({ agents: [agentWithStore] })
+  // 先建立绑定（否则 /sessions 无可列 agent）
+  await kit.hub.handleInbound(msg({ id: 'b-1', text: '先建立绑定' }))
+  await settle(kit)
+  await kit.hub.handleInbound(msg({ id: 'b-2', text: '/sessions' }))
+  await drain(kit.hub)
+  expect(kit.sent.map((s) => s.text).join('\n')).toContain('历史会话标题')
+  expect(kit.calls).toHaveLength(1) // /sessions 不进任务队列
+  // 裸数字回复：一次性绑定该会话，绝不变成新提示词
+  await kit.hub.handleInbound(msg({ id: 'b-3', text: '1' }))
+  await drain(kit.hub)
+  expect(kit.hub.dispatcher.binding('owner-1')?.sessionId).toBe(sessionId)
+  expect(kit.calls).toHaveLength(1)
 })

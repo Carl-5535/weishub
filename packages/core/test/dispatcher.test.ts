@@ -511,3 +511,25 @@ test('同一聊天连续两次 stop 只中止一次，只回复一条「已中�
   expect(calls).toHaveLength(1)
   expect(replies.filter((r) => r.text === '已中止')).toHaveLength(1)
 })
+
+test('queueInfo 汇报运行中与排队数（/status 展示用）', async () => {
+  const gates: ((value: TaskResult) => void)[] = []
+  const { run } = makeFakeRun(
+    () => new Promise<TaskResult>((resolve) => gates.push(resolve)),
+  )
+  const { deps } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  expect(d.queueInfo('c1')).toEqual({ running: false, queued: 0 })
+  d.bind('c1', 'claude')
+  expect(d.submit('c1', '一')).toBe('accepted')
+  await drain()
+  expect(d.queueInfo('c1')).toEqual({ running: true, queued: 0 })
+  expect(d.submit('c1', '二')).toBe('queued')
+  expect(d.queueInfo('c1')).toEqual({ running: true, queued: 1 })
+  gates[0]!({ text: '答一', exitCode: 0 })
+  await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+  expect(d.queueInfo('c1')).toEqual({ running: true, queued: 0 })
+  gates[1]!({ text: '答二', exitCode: 0 })
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(d.queueInfo('c1')).toEqual({ running: false, queued: 0 })
+})

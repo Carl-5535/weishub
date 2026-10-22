@@ -37,19 +37,24 @@ import {
 import {
   ApprovalRouter,
   ChatDispatcher,
+  listSessions as coreListSessions,
   runAgentTask,
   startNotifyApi,
   type AgentConfig,
   type PermissionMode,
   type RunOptions,
+  type SessionInfo,
   type TaskResult,
 } from '@weishub/core'
+import { handleCommand, resolveSelection } from './commands.js'
 
 export interface HubDeps {
   client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
   accountId: string
   ownerUserId: string
   agents: AgentConfig[]
+  /** 全部已配置 agent（含未安装），供 /agents 展示；缺省视为与 agents 相同 */
+  allAgents?: AgentConfig[]
   /** 全局工作目录，默认 ~/weishub-workspace（缺则创建） */
   workspace: string
   notifyPort?: number
@@ -64,34 +69,8 @@ export interface HubDeps {
   notifyToken?: string
 }
 
-/** 命令处理上下文（Task 17 的 /stop /new /agent 等在此之上实装）。 */
-export interface CommandContext {
-  chatId: string
-  dispatcher: ChatDispatcher
-  approvals: ApprovalRouter
-  outbox: Outbox
-  reply(text: string): Promise<void>
-}
-
-export type HandleCommand = (input: string, ctx: CommandContext) => Promise<boolean>
-
-const HELP_TEXT = [
-  '微枢命令：',
-  '/help 显示本帮助',
-  '/stop 停止当前任务',
-  '/new 开始新会话',
-  '/status 查看状态',
-  '（其余命令逐步完善中；非命令文本直接发给已绑定的 agent）',
-].join('\n')
-
-/**
- * 命令处理桩：本任务只对任何 `/` 开头文本回 /help 文本，
- * 完整命令行为由 Task 17 在此函数内实装（签名不变）。
- */
-export const handleCommand: HandleCommand = async (_input, ctx) => {
-  await ctx.reply(HELP_TEXT)
-  return true
-}
+/** 命令上下文与实装见 ./commands.js（CommandContext、handleCommand、resolveSelection）。 */
+export type { CommandContext } from './commands.js'
 
 const SEEN_CAP = 4096
 const POLL_BACKOFF_MS = 3000
@@ -234,6 +213,10 @@ export class Hub {
     const text = message.text.trim()
     if (text === '' && message.media.length === 0 && message.mediaErrors.length === 0) return
 
+    // /sessions 的序号选择最优先：裸数字回复只用于绑定会话，
+    // 绝不落入审批词匹配、命令解析或提示词管线
+    if (text !== '' && resolveSelection(message.chatId, text)) return
+
     // 审批应答优先：该 chat 有挂起审批时，同意/拒绝词直接决议，不进任务队列
     const pendings = this.approvals.pending().filter((a) => a.chatId === message.chatId)
     if (pendings.length > 0) {
@@ -259,6 +242,10 @@ export class Hub {
         dispatcher: this.dispatcher,
         approvals: this.approvals,
         outbox: this.outbox,
+        agents: this.#deps.agents,
+        allAgents: this.#deps.allAgents,
+        listSessions: (config: AgentConfig, limit?: number): Promise<SessionInfo[]> =>
+          coreListSessions(config, limit),
         reply: (reply) => this.#reply(message.chatId, reply),
       })
       return

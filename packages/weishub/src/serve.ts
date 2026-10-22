@@ -36,7 +36,8 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
   if (credential === undefined) {
     throw new Error('尚未登录微信（缺少凭据），请先执行扫码登录')
   }
-  const agents = await discoverAgents(await loadAgentConfigs(options.agentsDir))
+  const allAgents = await loadAgentConfigs(options.agentsDir)
+  const agents = await discoverAgents(allAgents)
   const client = new ILinkClient({
     token: credential.token,
     accountId: credential.accountId,
@@ -47,6 +48,7 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
     accountId: credential.accountId,
     ownerUserId: credential.userId ?? credential.accountId,
     agents,
+    allAgents,
     workspace,
     notifyPort: options.notifyPort,
     webPort: options.webPort,

@@ -81,6 +81,14 @@ export class ChatDispatcher {
     return state !== undefined && (state.running || state.queue.length > 0)
   }
 
+  /** /status 展示用：该 chat 是否有任务在跑与排队数（未绑定为空闲）。 */
+  queueInfo(chatId: string): { running: boolean; queued: number } {
+    const state = this.chats.get(chatId)
+    return state !== undefined
+      ? { running: state.running, queued: state.queue.length }
+      : { running: false, queued: 0 }
+  }
+
   /**
    * 提交任务：未绑定拒绝；在跑则排队（有界，满则拒绝）。
    * 永不抛出——run 的任何失败都转为 onReply 的「任务失败: …」。
