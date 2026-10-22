@@ -32,10 +32,10 @@
     "timeoutSec": 1800
   },
   {
-    "$note": "resume 已按本机 dsh headless --help 校准（--session-id <id> 恢复既有会话）",
+    "$note": "已按本机 `dsh headless --help` 校准：任务走 stdin，--session-id <id> 恢复会话",
     "name": "dsh",
     "detect": "dsh",
-    "run": ["dsh", "agent", "run"],
+    "run": ["dsh", "--profile", "headless"],
     "passVia": "stdin",
     "outputFormat": "text",
     "resume": ["--session-id", "{{sessionId}}"],

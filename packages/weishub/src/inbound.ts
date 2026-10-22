@@ -92,6 +92,8 @@ export interface ChatMessageEntry {
 }
 
 const MESSAGE_RING_CAP = 50
+/** 发件箱兜底重试间隔：一次持续失败后不必等重启 */
+const OUTBOX_RETRY_MS = 60_000
 const MESSAGE_EXCERPT_CHARS = 500
 
 function classifyApprovalReply(text: string): ApprovalReply {
@@ -156,11 +158,15 @@ export class Hub {
   #loopStarted = false
   /** Web 面板设置的工作目录覆盖（per-agent 优先于 agent 配置，再优先于全局） */
   #workspaceOverride: { global?: string; perAgent?: Record<string, string> } = {}
+  /** 唯一启用的 agent（未设置时退回第一个已发现的 agent） */
+  #enabledAgent: string | undefined
   readonly #pollAbort = new AbortController()
   /** 状态写入串行化：并发事件共享一条写入链，stop 时等待尾部写入完成 */
   #persistChain: Promise<void> = Promise.resolve()
   /** iLink 协议状态（轮询游标 + context token）：client onStateChange 喂入，随状态落盘 */
   #protocol: ILinkState | undefined
+  /** 发件箱兜底重试定时器（stop 时清除） */
+  #outboxRetryTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(deps: HubDeps) {
     this.#deps = deps
@@ -214,6 +220,32 @@ export class Hub {
   /** 已发现可用 agent 名（Web 面板聊天列表徽标与工作目录表单用）。 */
   get agents(): AgentConfig[] {
     return this.#deps.agents
+  }
+
+  /**
+   * 当前「启用」的 agent 名：一次只能启用一个。
+   * 显式设置过就用它（若该 agent 仍可用），否则退回第一个已发现的 agent。
+   */
+  get enabledAgent(): string | undefined {
+    if (this.#enabledAgent !== undefined && this.#deps.agents.some((a) => a.name === this.#enabledAgent)) {
+      return this.#enabledAgent
+    }
+    return this.#deps.agents[0]?.name
+  }
+
+  /**
+   * 启用某个 agent：把它设为唯一启用项，并把所有已绑定聊天改绑到它
+   * （换 agent 会重置会话，与 ChatDispatcher.bind 的规则一致）。
+   * 未安装/未发现的 agent 直接抛错，避免面板「启用成功」但实际不可用。
+   */
+  async enableAgent(name: string): Promise<void> {
+    const config = this.#deps.agents.find((a) => a.name === name)
+    if (config === undefined) throw new Error(`未安装或未发现 agent「${name}」`)
+    this.#enabledAgent = name
+    for (const chatId of Object.keys(this.dispatcher.snapshot().chats)) {
+      this.dispatcher.bind(chatId, name)
+    }
+    await this.#persistState()
   }
 
   /** 当前工作目录配置（global 为生效默认值，perAgent 为覆盖表）。 */
@@ -288,10 +320,27 @@ export class Hub {
     })
     if (this.#credential !== undefined) this.#startLoop()
     await this.outbox.resumePending().catch(() => undefined)
+    this.#startOutboxRetry()
+  }
+
+  /**
+   * 发件箱兜底重试：投递重试耗尽后条目会留在发件箱等下次机会，
+   * 但若只在 enqueue/启动时触发，一次持续失败会永久卡住（直到进程重启）。
+   * 这里按固定间隔再推一次；只在有挂起内容时才动，空发件箱零开销。
+   */
+  #startOutboxRetry(): void {
+    this.#outboxRetryTimer = setInterval(() => {
+      if (this.#stopped) return
+      const pending = this.outbox.pending()
+      if (Object.keys(pending).length === 0) return
+      void this.outbox.resumePending().catch(() => undefined)
+    }, OUTBOX_RETRY_MS)
+    this.#outboxRetryTimer.unref?.()
   }
 
   async stop(): Promise<void> {
     this.#stopped = true
+    if (this.#outboxRetryTimer !== undefined) clearInterval(this.#outboxRetryTimer)
     // 关机先停任务：中止所有在跑 agent 进程树、丢弃队列（不执行新任务），再做收尾持久化
     this.dispatcher.stopAll()
     this.#pollAbort.abort()
@@ -420,10 +469,10 @@ export class Hub {
         await this.#reply(message.chatId, NO_AGENTS_TEXT)
         return
       }
-      const first = this.#deps.agents[0]!
-      this.dispatcher.bind(message.chatId, first.name)
+      const enabled = this.enabledAgent ?? this.#deps.agents[0]!.name
+      this.dispatcher.bind(message.chatId, enabled)
       await this.#persistState()
-      await this.#reply(message.chatId, `已绑定 agent「${first.name}」，直接发消息即可开始。`)
+      await this.#reply(message.chatId, `已绑定 agent「${enabled}」，直接发消息即可开始。`)
     }
 
     const outcome = this.dispatcher.submit(message.chatId, prompt)
@@ -535,6 +584,7 @@ export class Hub {
         outbox?: Record<string, OutboxItem>
         workspace?: { global?: string; perAgent?: Record<string, string> }
         protocol?: unknown
+        enabledAgent?: string
       }>(defaultStatePath())
       for (const [chatId, binding] of Object.entries(state.chats ?? {})) {
         if (this.dispatcher.bind(chatId, binding.agentName) !== undefined && binding.sessionId !== undefined) {
@@ -547,6 +597,10 @@ export class Hub {
       if (state.outbox !== undefined) this.outbox.load(state.outbox)
       // 协议状态：保留到内存，保证后续持久化不丢游标（client 侧的恢复由 serve 在构造时完成）
       this.#protocol = normalizeProtocol(state.protocol)
+      // 唯一启用的 agent：只在仍可用时采用，否则由 getter 退回第一个已发现项
+      if (typeof state.enabledAgent === 'string' && state.enabledAgent !== '') {
+        this.#enabledAgent = state.enabledAgent
+      }
       // 工作目录覆盖：只接受合法形态，其余按无覆盖处理
       const saved = state.workspace
       if (typeof saved?.global === 'string' && saved.global !== '') this.#workspaceOverride.global = saved.global
@@ -572,6 +626,7 @@ export class Hub {
         ...(this.#workspaceOverride.global !== undefined ? { global: this.#workspaceOverride.global } : {}),
         ...(this.#workspaceOverride.perAgent !== undefined ? { perAgent: this.#workspaceOverride.perAgent } : {}),
       },
+      ...(this.enabledAgent !== undefined ? { enabledAgent: this.enabledAgent } : {}),
       ...(this.#protocol !== undefined ? { protocol: this.#protocol } : {}),
     }
     const write = this.#persistChain.catch(() => undefined).then(async () => {

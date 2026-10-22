@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connect } from 'node:net'
@@ -205,13 +205,16 @@ test('/api/state 返回 snapshot、pending 审批与登录态', async () => {
     loggedIn: boolean
     chats: { chatId: string; agentName: string; mode: string; queued: number }[]
     approvals: { id: string; tool: string }[]
-    agents: string[]
+    agents: { name: string; enabled: boolean }[]
+    enabledAgent: string | null
   }
   expect(body.loggedIn).toBe(false)
   const chat = body.chats.find((c) => c.chatId === 'room-1')
   expect(chat).toMatchObject({ agentName: 'codex', mode: 'full', queued: 0 })
   expect(body.approvals).toEqual([expect.objectContaining({ id, tool: 'Bash' })])
-  expect(body.agents).toEqual(['claude', 'codex'])
+  expect(body.agents.map((a) => a.name)).toEqual(['claude', 'codex'])
+  expect(body.enabledAgent).toBe('claude')
+  expect(body.agents.filter((a) => a.enabled).map((a) => a.name)).toEqual(['claude'])
 })
 
 test('/api/chats/:id/send 以 owner 身份注入：run 收到提示词、fake client 收到回复', async () => {
@@ -320,16 +323,59 @@ test('/api/qr/start 用注入的假 fetch 返回 display 与二维码 dataUrl；
   expect(await idle.json()).toEqual({ status: 'idle' })
 })
 
-test('GET / 返回 index.html（含 root 标记）；GET /app.js 返回脚本', async () => {
+test('GET / 返回面板页面；GET /app.js 返回脚本', async () => {
   const kit = makeHub()
   const { url } = await makeServer(kit.hub)
   const page = await get(url, '/')
   expect(page.status).toBe(200)
   expect(page.headers.get('content-type')).toContain('text/html')
-  expect(await page.text()).toContain('<div id="root">')
+  const html = await page.text()
+  expect(html).toContain('id="engine-rack"')
+  expect(html).toContain('id="login-overlay"')
   const js = await get(url, '/app.js')
   expect(js.status).toBe(200)
   expect(js.headers.get('content-type')).toContain('javascript')
   expect(await js.text()).toContain('/api/state')
   expect((await get(url, '/nope.js')).status).toBe(404)
+})
+
+test('PUT /api/agent 切换唯一启用的 agent，并把已绑定会话改绑过去', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  kit.hub.dispatcher.bind('room-a', 'claude')
+  kit.hub.dispatcher.setSession('room-a', 'sess-1')
+
+  const res = await putJson(url, '/api/agent', { name: 'codex' })
+  expect(res.status).toBe(200)
+  expect((await res.json()).enabledAgent).toBe('codex')
+
+  // 唯一性：只有 codex 是启用的
+  const state = (await (await get(url, '/api/state')).json()) as {
+    agents: { name: string; enabled: boolean }[]
+    enabledAgent: string | null
+    chats: { chatId: string; agentName: string; sessionId?: string }[]
+  }
+  expect(state.enabledAgent).toBe('codex')
+  expect(state.agents.filter((a) => a.enabled)).toHaveLength(1)
+  expect(state.agents.find((a) => a.enabled)!.name).toBe('codex')
+  // 改绑：现有聊天跟随启用的 agent，且换 agent 会重置会话
+  const chat = state.chats.find((c) => c.chatId === 'room-a')!
+  expect(chat.agentName).toBe('codex')
+  expect(chat.sessionId).toBeUndefined()
+})
+
+test('PUT /api/agent 拒绝未安装的 agent', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  const res = await putJson(url, '/api/agent', { name: 'gemini' })
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toContain('未安装或未发现')
+})
+
+test('启用的 agent 持久化：重启后仍是同一个', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  await putJson(url, '/api/agent', { name: 'codex' })
+  const saved = JSON.parse(await readFile(join(homeDir, 'state.json'), 'utf8')) as { enabledAgent?: string }
+  expect(saved.enabledAgent).toBe('codex')
 })

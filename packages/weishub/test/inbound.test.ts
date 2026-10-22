@@ -623,3 +623,31 @@ test('/sessions 后回复裸数字：绑定会话而非当作提示词或命令'
   expect(kit.hub.dispatcher.binding('owner-1')?.sessionId).toBe(sessionId)
   expect(kit.calls).toHaveLength(1)
 })
+
+test('发件箱重试耗尽后，兜底定时器会再次尝试投递', async () => {
+  vi.useFakeTimers()
+  try {
+    const kit = makeHub()
+    await kit.hub.start() // 兜底重试定时器在 start 里装
+    let failing = true
+    let attempts = 0
+    kit.client.sendText = (async () => {
+      attempts += 1
+      if (failing) throw new Error('通道不可用')
+    }) as HubDeps['client']['sendText']
+
+    await kit.hub.handleInbound(msg({ text: '会先失败的消息' }))
+    await vi.advanceTimersByTimeAsync(30_000) // 走完单次投递的重试
+    const failedAttempts = attempts
+    expect(failedAttempts).toBeGreaterThan(0)
+    expect(kit.hub.outbox.pending()['owner-1']).toBeDefined() // 失败不丢，留在发件箱
+
+    failing = false
+    await vi.advanceTimersByTimeAsync(61_000) // 兜底定时器再推一次
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(kit.hub.outbox.pending()['owner-1']).toBeUndefined()
+    expect(attempts).toBeGreaterThan(failedAttempts)
+  } finally {
+    vi.useRealTimers()
+  }
+})

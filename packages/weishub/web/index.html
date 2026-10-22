@@ -3,95 +3,317 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>微枢 · 本地面板</title>
+<title>微枢</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light dark;
+    --ink: #14181d;
+    --slate: #5c6875;
+    --paper: #eef1f4;
+    --panel: #ffffff;
+    --brass: #a8621f;
+    --brass-soft: #f3e6d8;
+    --rule: #d3dae1;
+    --danger: #a8321f;
+    --ok: #1f6b45;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e6e9ec;
+      --slate: #97a2ae;
+      --paper: #14171a;
+      --panel: #1c2024;
+      --brass: #d9934e;
+      --brass-soft: #2e2419;
+      --rule: #30373e;
+      --danger: #e0705a;
+      --ok: #5cbf8e;
+    }
+  }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, "PingFang SC", sans-serif; margin: 0; background: #f5f6f8; color: #1c1e21; }
-  body.dark { background: #17181a; color: #e4e6eb; }
-  header { background: #2c3e50; color: #fff; padding: 10px 18px; font-size: 16px; }
-  main { max-width: 860px; margin: 0 auto; padding: 14px; display: grid; gap: 14px; }
-  section { background: #fff; border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
-  body.dark section { background: #232427; }
-  h2 { margin: 0 0 10px; font-size: 15px; }
-  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px; background: #e8f0fe; color: #1a56b0; margin-left: 6px; vertical-align: 1px; }
-  body.dark .badge { background: #2b3a55; color: #9ec1ff; }
-  .badge.busy { background: #fdecec; color: #b03a1a; }
-  body.dark .badge.busy { background: #4a2a22; color: #ff9d7a; }
-  .badge.mode { background: #e9f7ee; color: #1c7c3c; }
-  body.dark .badge.mode { background: #23402e; color: #7fe0a1; }
-  #login { text-align: center; }
-  #qr-img { width: 220px; height: 220px; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li.chat-item { padding: 8px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
-  body.dark li.chat-item { border-color: #333; }
-  li.chat-item:hover, li.chat-item.sel { background: #eef4ff; }
-  body.dark li.chat-item:hover, body.dark li.chat-item.sel { background: #2a3140; }
-  #msg-list li { padding: 4px 0 4px 8px; font-size: 13px; word-break: break-all; border-left: 3px solid transparent; }
-  /* 消息流：收（in，owner 发出）与发（out，hub 回复）样式区分 */
-  #msg-list li.in { border-left-color: #2c6e49; }
-  #msg-list li.out { border-left-color: #b7bfc9; color: #555; }
-  body.dark #msg-list li.in { border-left-color: #4f9e6e; }
-  body.dark #msg-list li.out { border-left-color: #3a3f47; color: #aaa; }
-  #send-form { display: flex; gap: 8px; margin-top: 8px; }
-  input[type=text] { flex: 1; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
-  body.dark input[type=text] { background: #1b1c1e; color: inherit; border-color: #444; }
-  button { padding: 7px 14px; border: 0; border-radius: 6px; background: #2c6e49; color: #fff; cursor: pointer; font-size: 13px; }
-  button.secondary { background: #5a6472; }
-  button.deny { background: #b03a1a; }
-  .approval-card { border: 1px solid #f0d2b8; background: #fff8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
-  body.dark .approval-card { background: #33281f; border-color: #5a4632; }
-  .approval-card pre { white-space: pre-wrap; word-break: break-all; margin: 6px 0; font-size: 12px; }
-  .approval-card .actions { display: flex; gap: 8px; margin-top: 6px; }
-  .ws-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .ws-row label { min-width: 80px; font-size: 13px; }
-  .ws-row input[type=text] { flex: 1; }
-  .muted { color: #888; font-size: 12px; }
-  .err { color: #b03a1a; font-size: 12px; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 14px/1.6 -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  h1 { font-size: 17px; }
+  h2 { font-size: 13px; color: var(--slate); font-weight: 600; }
+  h3 { font-size: 14px; }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .muted { color: var(--slate); font-size: 12.5px; }
+  .err { color: var(--danger); font-size: 12.5px; }
+
+  /* 顶栏：一行，克制 */
+  .topbar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 20px; height: 52px;
+    background: var(--panel); border-bottom: 1px solid var(--rule);
+  }
+  .topbar .spacer { flex: 1; }
+  .brand { display: flex; align-items: baseline; gap: 8px; }
+  .brand small { color: var(--slate); font-size: 12px; letter-spacing: 0.04em; }
+
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--rule); flex: none;
+  }
+  .status-dot.on { background: var(--ok); }
+  .status-dot.off { background: var(--danger); }
+  .status-line { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--slate); }
+
+  button {
+    font: inherit; font-size: 13px;
+    padding: 6px 13px; border-radius: 6px;
+    border: 1px solid var(--rule); background: var(--panel); color: var(--ink);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--slate); }
+  button:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+  button.primary { background: var(--brass); border-color: var(--brass); color: #fff; }
+  button.primary:hover { filter: brightness(1.06); }
+  button.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--rule)); }
+  button.quiet { border-color: transparent; background: transparent; color: var(--slate); padding: 4px 8px; }
+  button.quiet:hover { color: var(--ink); border-color: var(--rule); }
+  button:disabled { opacity: 0.45; cursor: default; }
+
+  /* 主体：左引擎架 + 右工作区 */
+  .shell {
+    display: grid; grid-template-columns: 236px 1fr;
+    gap: 0; height: calc(100% - 52px);
+  }
+  .rail {
+    background: var(--panel); border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; overflow-y: auto;
+  }
+  .rail-head {
+    padding: 16px 16px 8px;
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  .rail-head .count { color: var(--slate); font-size: 12px; }
+
+  /* 引擎架：连续模块插槽，不做一张张浮起的卡 */
+  .engines { display: flex; flex-direction: column; }
+  .engine {
+    display: grid; grid-template-columns: 34px 1fr auto;
+    align-items: center; gap: 10px;
+    padding: 11px 14px 11px 12px;
+    border: 0; border-top: 1px solid var(--rule);
+    border-left: 3px solid transparent;
+    background: transparent; color: inherit;
+    text-align: left; cursor: pointer; width: 100%;
+  }
+  .engine:last-child { border-bottom: 1px solid var(--rule); }
+  .engine:hover { background: color-mix(in srgb, var(--paper) 60%, var(--panel)); }
+  .engine[aria-pressed="true"] {
+    border-left-color: var(--brass);
+    background: var(--brass-soft);
+  }
+  .engine[disabled] { cursor: not-allowed; opacity: 0.55; }
+  .engine[disabled]:hover { background: transparent; }
+  .engine .glyph {
+    width: 30px; height: 30px; border-radius: 5px;
+    display: grid; place-items: center;
+    background: color-mix(in srgb, var(--slate) 12%, transparent);
+    color: var(--slate);
+  }
+  .engine[aria-pressed="true"] .glyph {
+    background: var(--brass); color: #fff;
+  }
+  .engine .glyph svg { width: 19px; height: 19px; display: block; }
+  .engine .label { min-width: 0; }
+  .engine .name { font-family: var(--mono); font-size: 13px; font-weight: 600; display: block; }
+  .engine .state { font-size: 11.5px; color: var(--slate); display: block; margin-top: 1px; }
+  .engine[aria-pressed="true"] .state { color: var(--brass); }
+  .engine .radio {
+    width: 13px; height: 13px; border-radius: 50%;
+    border: 1.5px solid var(--rule); flex: none;
+  }
+  .engine[aria-pressed="true"] .radio {
+    border-color: var(--brass);
+    background: radial-gradient(circle, var(--brass) 0 3.5px, transparent 4px);
+  }
+  .rail-empty { padding: 14px 16px; color: var(--slate); font-size: 12.5px; line-height: 1.7; }
+
+  /* 右工作区 */
+  .work { overflow-y: auto; padding: 18px 22px 40px; display: grid; gap: 22px; align-content: start; }
+  .block-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 9px; }
+  .block-head .hint { color: var(--slate); font-size: 12px; }
+
+  .surface {
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  }
+
+  /* 待审批 */
+  .approval { padding: 12px 14px; border-top: 1px solid var(--rule); }
+  .approval:first-child { border-top: 0; }
+  .approval .who {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12.5px; margin-bottom: 6px;
+  }
+  .approval .tag {
+    background: var(--brass-soft); color: var(--brass);
+    border-radius: 4px; padding: 0 6px; font-weight: 600;
+  }
+  .approval pre {
+    margin: 0 0 10px; padding: 9px 10px; overflow-x: auto;
+    background: color-mix(in srgb, var(--paper) 75%, var(--panel));
+    border-radius: 4px; font-family: var(--mono); font-size: 12px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .approval .actions { display: flex; gap: 8px; }
+  .empty { padding: 14px; color: var(--slate); font-size: 12.5px; }
+
+  /* 会话 */
+  .chats { display: grid; grid-template-columns: 220px 1fr; }
+  .chats.is-empty { grid-template-columns: 1fr; }
+  .chat-list { border-right: 1px solid var(--rule); display: flex; flex-direction: column; }
+  .chat-list:empty { display: none; }
+  .chat-item {
+    border: 0; border-bottom: 1px solid var(--rule); background: transparent;
+    text-align: left; padding: 10px 12px; cursor: pointer; color: inherit;
+    border-left: 3px solid transparent; font: inherit;
+  }
+  .chat-item:hover { background: color-mix(in srgb, var(--paper) 60%, var(--panel)); }
+  .chat-item[aria-selected="true"] { border-left-color: var(--brass); background: var(--brass-soft); }
+  .chat-item .cid { font-family: var(--mono); font-size: 12px; display: block; word-break: break-all; }
+  .chat-item .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+
+  .chip {
+    font-size: 11px; line-height: 1.5; padding: 0 6px; border-radius: 3px;
+    background: color-mix(in srgb, var(--slate) 12%, transparent); color: var(--slate);
+  }
+  .chip.agent { font-family: var(--mono); color: var(--ink); }
+  .chip.live { background: var(--brass-soft); color: var(--brass); font-weight: 600; }
+
+  .chat-pane { display: flex; flex-direction: column; min-width: 0; }
+  .chat-head {
+    padding: 10px 14px; border-bottom: 1px solid var(--rule);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .chat-head .cid { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .msg-list {
+    list-style: none; margin: 0; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1;
+    max-height: 420px;
+  }
+  .msg-list li { font-size: 13px; line-height: 1.6; word-break: break-word; max-width: 68ch; }
+  .msg-list li.in {
+    align-self: flex-end; background: var(--brass-soft);
+    border-radius: 6px 6px 2px 6px; padding: 6px 10px;
+  }
+  .msg-list li.out {
+    align-self: flex-start; background: color-mix(in srgb, var(--paper) 80%, var(--panel));
+    border-radius: 6px 6px 6px 2px; padding: 6px 10px;
+  }
+  .msg-list li.note { color: var(--slate); font-size: 12.5px; font-style: normal; }
+  .compose { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--rule); }
+  .compose input { flex: 1; }
+
+  input[type=text] {
+    font: inherit; font-size: 13px; padding: 7px 10px;
+    border: 1px solid var(--rule); border-radius: 5px;
+    background: var(--panel); color: var(--ink); min-width: 0;
+  }
+  input[type=text]:focus-visible { outline: 2px solid var(--brass); outline-offset: -1px; border-color: var(--brass); }
+  input[type=text]::placeholder { color: color-mix(in srgb, var(--slate) 70%, transparent); }
+
+  /* 工作目录 */
+  .ws-grid { padding: 14px; display: grid; gap: 12px; }
+  .ws-row {
+    display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 12px;
+  }
+  .ws-row label { color: var(--slate); font-size: 12.5px; }
+  .ws-row label .mono { color: var(--ink); }
+  .ws-foot { display: flex; align-items: center; gap: 12px; padding-top: 2px; }
+
+  /* 扫码 */
+  .qr-box { padding: 18px; display: grid; justify-items: center; gap: 12px; text-align: center; }
+  .qr-box img { width: 208px; height: 208px; border-radius: 6px; background: #fff; padding: 6px; }
+  .qr-box .quote { max-width: 38ch; color: var(--slate); font-size: 12.5px; }
+
+  @media (max-width: 760px) {
+    .shell { grid-template-columns: 1fr; height: auto; }
+    .rail { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .engines { display: grid; grid-template-columns: 1fr 1fr; }
+    .engine { border-left-width: 3px; }
+    .chats { grid-template-columns: 1fr; }
+    .chat-list { border-right: 0; border-bottom: 1px solid var(--rule); flex-direction: row; overflow-x: auto; }
+    .chat-item { border-bottom: 0; border-right: 1px solid var(--rule); min-width: 150px; }
+    .work { padding: 14px; }
+    .ws-row { grid-template-columns: 1fr; gap: 4px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
 </style>
 </head>
 <body>
-<div id="root">
-  <header>微枢 · 本地面板</header>
-  <main>
-    <section id="login-sec">
-      <h2>登录状态 <span id="login-badge" class="badge">检查中…</span></h2>
-      <div id="login" hidden>
-        <h3>扫码登录</h3>
-        <img id="qr-img" alt="微信登录二维码">
-        <p id="qr-status">正在获取二维码…</p>
-        <button id="qr-refresh" class="secondary">刷新二维码</button>
+  <header class="topbar">
+    <div class="brand"><h1>微枢</h1><small>微信 ⇄ 本机 agent</small></div>
+    <div class="spacer"></div>
+    <div class="status-line">
+      <span id="login-dot" class="status-dot"></span>
+      <span id="login-text">检查中</span>
+    </div>
+    <button id="relogin" class="quiet">重新扫码</button>
+  </header>
+
+  <div class="shell">
+    <aside class="rail">
+      <div class="rail-head">
+        <h2>引擎</h2>
+        <span class="count" id="engine-count"></span>
       </div>
-      <div id="logged-in" hidden>
-        <p class="muted">已登录。<span id="login-hint">如需更换微信账号，点下方重新扫码。</span></p>
-        <button id="relogin" class="secondary">重新扫码登录</button>
+      <div class="engines" id="engine-rack" role="group" aria-label="已安装的 agent，只能启用一个"></div>
+      <div class="rail-empty" id="engine-empty" hidden>
+        没有探测到已安装的 agent。<br>
+        装好 claude、codex、dsh 或 pi 后重启微枢。
       </div>
-    </section>
-    <section id="approvals-sec">
-      <h2>待审批</h2>
-      <div id="approval-list"><p class="muted">暂无待审批</p></div>
-    </section>
-    <section id="chats-sec">
-      <h2>会话</h2>
-      <ul id="chat-list"></ul>
-      <div id="chat-detail" hidden>
-        <h3 id="chat-title"></h3>
-        <ul id="msg-list"></ul>
-        <form id="send-form">
-          <input type="text" id="send-text" placeholder="以 owner 身份插入一条消息…" autocomplete="off">
-          <button type="submit">发送</button>
-        </form>
-      </div>
-    </section>
-    <section id="workspace-sec">
-      <h2>工作目录</h2>
-      <div class="ws-row"><label for="ws-global">全局</label><input type="text" id="ws-global"></div>
-      <div id="ws-per"></div>
-      <button id="ws-save">保存</button>
-      <span id="ws-msg" class="muted"></span>
-    </section>
-  </main>
-</div>
+    </aside>
+
+    <main class="work">
+      <section>
+        <div class="block-head"><h2>待审批</h2><span class="hint" id="approval-hint"></span></div>
+        <div class="surface" id="approval-list"></div>
+      </section>
+
+      <section>
+        <div class="block-head"><h2>会话</h2><span class="hint">消息流保留最近 50 条</span></div>
+        <div class="surface chats">
+          <div class="chat-list" id="chat-list"></div>
+          <div class="chat-pane" id="chat-pane">
+            <div class="empty">暂无会话。在微信里给机器人发一条消息就会出现在这里。</div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div class="block-head"><h2>工作目录</h2><span class="hint">agent 执行任务时的根目录，越界读写会被拦下</span></div>
+        <div class="surface">
+          <div class="ws-grid">
+            <div class="ws-row"><label for="ws-global">全局默认</label><input type="text" id="ws-global" spellcheck="false"></div>
+            <div id="ws-per"></div>
+            <div class="ws-foot"><button id="ws-save" class="primary">保存</button><span id="ws-msg" class="muted"></span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="login-overlay" class="surface" hidden style="position:fixed;inset:0;margin:auto;width:min(360px,92vw);height:fit-content;z-index:10;box-shadow:0 20px 60px rgb(0 0 0 / 18%);">
+    <div class="qr-box">
+      <h3>扫码登录微信</h3>
+      <img id="qr-img" alt="微信登录二维码">
+      <p id="qr-status" class="quote">正在获取二维码…</p>
+      <button id="qr-refresh" class="quiet">换个二维码</button>
+    </div>
+  </div>
+
 <script src="app.js"></script>
 </body>
 </html>

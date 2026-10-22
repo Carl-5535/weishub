@@ -138,12 +138,30 @@ export async function startWebServer(
       }))
       return send(res, 200, {
         loggedIn: hub.loggedIn,
-        agents: hub.agents.map((a) => a.name),
+        agents: hub.agents.map((a) => ({
+          name: a.name,
+          enabled: a.name === hub.enabledAgent,
+          approval: a.approval ?? null,
+        })),
+        enabledAgent: hub.enabledAgent ?? null,
         chats,
         approvals: hub.approvals.pending(),
         workspace: hub.getWorkspace(),
         outbox: hub.outbox.pending(),
       })
+    }
+
+    if (req.method === 'PUT' && path === '/api/agent') {
+      const body = await readJson(req, cap)
+      if (body === 'too-large') return send(res, 413, { error: '请求体过大' })
+      const name = typeof body?.name === 'string' ? body.name.trim() : ''
+      if (name === '') return send(res, 400, { error: 'name 必须是非空字符串' })
+      try {
+        await hub.enableAgent(name)
+      } catch (error) {
+        return send(res, 400, { error: (error as Error).message })
+      }
+      return send(res, 200, { ok: true, enabledAgent: hub.enabledAgent })
     }
 
     if (req.method === 'POST' && path === '/api/qr/start') {

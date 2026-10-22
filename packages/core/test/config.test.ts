@@ -63,7 +63,7 @@ test('内置配置包含 dsh 与 pi，且 $note 注释键被剥离', async () =>
     expect(Object.keys(c).some((k) => k.startsWith('$'))).toBe(false)
   }
   const dsh = configs.find((c) => c.name === 'dsh')!
-  expect(dsh.run).toEqual(['dsh', 'agent', 'run'])
+  expect(dsh.run).toEqual(['dsh', '--profile', 'headless'])
   expect(dsh.outputFormat).toBe('text')
   expect(dsh.approval).toBeNull()
   // dsh headless 支持 --session-id <id>（flag 式）：追加式 resume
