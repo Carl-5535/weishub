@@ -84,7 +84,7 @@ const PATTERNS: { test: RegExp; hint: (m: RegExpMatchArray) => AgentFailureHint 
   },
   {
     // 网络 / 服务端不可达
-    test: /(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|getaddrinfo)/i,
+    test: /(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|fetch failed|getaddrinfo|Connection failed)/i,
     hint: () => ({
       summary: 'agent 无法连接到它的服务端',
       action: '检查网络或代理设置后重试',
@@ -120,12 +120,14 @@ export function formatAgentFailure(agentName: string, raw: string): string {
   return `任务失败: ${firstMeaningfulLine(raw)}`
 }
 
-/** 取原文里最有信息量的一行（跳过空行与纯堆栈帧）。 */
+/** 取原文里最有信息量的一行（跳过空行、纯堆栈帧、以及各 CLI 的固定 stderr 噪声）。 */
 function firstMeaningfulLine(raw: string): string {
   for (const line of raw.split('\n')) {
     const text = line.trim()
     if (text === '') continue
     if (text.startsWith('at ')) continue
+    // codex/pi 每次运行都往 stderr 打的固定噪声，留着只会盖住真正的错误
+    if (/^Reading (additional )?prompt from stdin\.\.\.$/.test(text)) continue
     return text.length > 200 ? `${text.slice(0, 200)}…` : text
   }
   return '（无输出）'

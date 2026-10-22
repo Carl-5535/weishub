@@ -85,3 +85,16 @@ describe('codex 特有报错（实测逐字）', () => {
     expect(message).toContain('codex login')
   })
 })
+
+describe('stderr 噪声过滤', () => {
+  test('codex 的固定首行噪声不再盖住真正的错误', () => {
+    const stderr = ['Reading prompt from stdin...', '2026-10-22T11:42 ERROR codex_models_manager: failed to refresh available models: Connection failed'].join('\n')
+    const message = formatAgentFailure('codex', stderr)
+    expect(message).toContain('无法连接')
+    expect(message).not.toContain('Reading prompt')
+  })
+
+  test('全是噪声时报“无输出”而不是误报噪声本身', () => {
+    expect(formatAgentFailure('codex', 'Reading prompt from stdin...')).toContain('（无输出）')
+  })
+})
