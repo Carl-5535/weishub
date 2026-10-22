@@ -1,5 +1,6 @@
 import { runAgentTask, type RunOptions, type TaskResult } from './adapter.js'
 import type { AgentConfig, PermissionMode } from './types.js'
+import { formatAgentFailure } from './failure.js'
 
 export interface DispatcherDeps {
   agents: AgentConfig[]
@@ -172,7 +173,8 @@ export class ChatDispatcher {
         // stop 主动中止时已回复「已中止」，避免重复报错
         if (!state.abort?.signal.aborted) {
           const message = err instanceof Error ? err.message : String(err)
-          return this.reply(chatId, `任务失败: ${message}`)
+          // 把「配置没配好」这类失败翻译成用户能照做的提示（未识别时保留原文）
+          return this.reply(chatId, formatAgentFailure(state.binding.agentName, message))
         }
         return undefined
       })
