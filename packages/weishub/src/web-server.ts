@@ -11,7 +11,7 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
@@ -40,6 +40,9 @@ const DEFAULT_MAX_BODY_BYTES = 1024 * 1024
 
 /** 编译产物 lib/web-server.js 与源码 src/web-server.ts 都位于包根下一层，../web/ 在两种形态下均指向 packages/weishub/web/。 */
 const WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url))
+
+/** 回环 Host 围栏：只接受本机地址，防 DNS rebinding。 */
+const LOOPBACK_HOST = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -83,6 +86,7 @@ export async function startWebServer(
 ): Promise<{ port: number; close(): Promise<void> }> {
   const cap = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
   const fetchImpl = deps.fetch ?? globalThis.fetch
+  let versionCache: string | undefined
   let loginSession: LoginSession | undefined
 
   const server: Server = createServer((req, res) => {
@@ -93,6 +97,15 @@ export async function startWebServer(
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
     const path = url.pathname
     const hub = deps.hub
+
+    // Host 围栏（对应 dsh 的 browser-trust fence）：只接受回环地址的 Host。
+    // 防 DNS rebinding——攻击者把域名解析到 127.0.0.1 时，Host 头是他的域名。
+    // 这是 token 之外的第二道锁：即使 token 泄露，外部页面也难以借道。
+    if (!LOOPBACK_HOST.test(req.headers.host ?? '')) {
+      res.statusCode = 403
+      res.end()
+      return
+    }
 
     // 鉴权先行：Bearer 头或 ?token= 查询参数任一命中即可。
     // 页面、静态资源、API 一视同仁——面板地址由 weishub 启动时打印（带 token）并在浏览器自动打开。
@@ -126,7 +139,6 @@ export async function startWebServer(
     if (req.method === 'GET' && path === '/app.js') {
       return serveFile(res, 'app.js')
     }
-
     // ---- API ----
     if (req.method === 'GET' && path === '/api/state') {
       const snapshot = hub.dispatcher.snapshot()
@@ -278,13 +290,28 @@ export async function startWebServer(
    * 浏览器对子资源请求**不会**继承页面的查询参数，`<script src="app.js">`
    * 必然被 401 拦掉、整个脚本不执行、页面成空壳——所以必须在服务端补上。
    */
+  /**
+   * app.js 内容哈希：页面的 script 引用带上它，
+   * 代码一改 URL 就变，浏览器不会拿旧缓存跑出新旧混杂的白屏。
+   */
+  async function assetVersion(): Promise<string> {
+    if (versionCache !== undefined) return versionCache
+    try {
+      versionCache = createHash('sha256').update(await readFile(join(WEB_DIR, 'app.js'))).digest('hex').slice(0, 10)
+    } catch {
+      versionCache = '0'
+    }
+    return versionCache
+  }
+
   async function servePage(res: ServerResponse): Promise<void> {
     try {
       const html = await readFile(join(WEB_DIR, 'index.html'), 'utf8')
       const token = encodeURIComponent(deps.token)
+      const version = await assetVersion()
       const body = html.replace(
         '<script src="app.js"></script>',
-        `<script src="app.js?token=${token}"></script>`,
+        `<script src="app.js?v=${version}&token=${token}"></script>`,
       )
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',

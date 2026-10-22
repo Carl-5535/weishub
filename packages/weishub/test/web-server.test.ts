@@ -403,10 +403,27 @@ test('页面返回的 HTML 里 script src 带上了 token（浏览器子资源�
   const res = await fetch(`${url}/?token=${TOKEN}`)
   const html = await res.text()
   // 关键：<script src> 必须自带 token，否则 app.js 会被 401 拦掉、整页成空壳
-  expect(html).toContain(`<script src="app.js?token=${TOKEN}"></script>`)
+  // script 自带 token + 内容指纹（指纹让代码变更后 URL 随之改变，杜绝旧缓存白屏）
+  expect(html).toMatch(new RegExp(`<script src="app\\.js\\?v=[0-9a-f]{10}&token=${TOKEN}"></script>`))
   expect(html).not.toContain('<script src="app.js"></script>')
   // 该脚本地址确实可用
   expect((await fetch(`${url}/app.js?token=${TOKEN}`)).status).toBe(200)
   // 不许缓存：token 变了页面必须跟着变
   expect(res.headers.get('cache-control')).toBe('no-store')
+})
+
+
+test('Host 围栏：非回环 Host 一律 403（防 DNS rebinding）', async () => {
+  const kit = makeHub()
+  const { port } = await makeServer(kit.hub)
+  // 攻击者域名解析到 127.0.0.1 时，Host 是他的域名
+  const rebound = await rawGetResponse(port, 'evil.example.com', '/', `Authorization: Bearer ${TOKEN}\r\n`)
+  expect(rebound.status).toBe(403)
+  const reboundHome = await rawGetResponse(port, 'evil.example.com:8090', `/?token=${TOKEN}`)
+  expect(reboundHome.status).toBe(403)
+  // 回环的几种写法都放行
+  for (const host of [`127.0.0.1:${port}`, `localhost:${port}`]) {
+    const ok = await rawGetResponse(port, host, `/?token=${TOKEN}`)
+    expect(ok.status).toBe(200)
+  }
 })
