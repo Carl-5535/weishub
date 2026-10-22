@@ -1,0 +1,60 @@
+[
+  {
+    "name": "claude",
+    "detect": "claude",
+    "run": ["claude", "-p", "--output-format", "json"],
+    "passVia": "stdin",
+    "outputFormat": "claude-json",
+    "listSessions": { "store": "~/.claude/projects", "kind": "claude" },
+    "resume": ["--resume", "{{sessionId}}"],
+    "approval": "permission-prompt-tool",
+    "permissionFlags": {
+      "auto": ["--permission-mode", "workspace-write"],
+      "full": ["--dangerously-skip-permissions"]
+    },
+    "workspace": null,
+    "timeoutSec": 1800
+  },
+  {
+    "name": "codex",
+    "detect": "codex",
+    "run": ["codex", "exec", "--json"],
+    "passVia": "stdin",
+    "outputFormat": "codex-jsonl",
+    "listSessions": { "store": "~/.codex/sessions", "kind": "codex" },
+    "resume": ["exec", "resume", "{{sessionId}}"],
+    "approval": "app-server",
+    "permissionFlags": {
+      "auto": [],
+      "full": ["--dangerously-bypass-approvals-and-sandbox"]
+    },
+    "workspace": null,
+    "timeoutSec": 1800
+  },
+  {
+    "$note": "执行时以实际 CLI 输出校准",
+    "name": "dsh",
+    "detect": "dsh",
+    "run": ["dsh", "agent", "run"],
+    "passVia": "stdin",
+    "outputFormat": "text",
+    "resume": ["dsh", "agent", "resume", "{{sessionId}}"],
+    "approval": null,
+    "permissionFlags": { "auto": [], "full": [] },
+    "workspace": null,
+    "timeoutSec": 1800
+  },
+  {
+    "$note": "执行时以实际 CLI 输出校准",
+    "name": "pi",
+    "detect": "pi",
+    "run": ["pi"],
+    "passVia": "stdin",
+    "outputFormat": "text",
+    "resume": ["--resume", "{{sessionId}}"],
+    "approval": null,
+    "permissionFlags": { "auto": [], "full": [] },
+    "workspace": null,
+    "timeoutSec": 1800
+  }
+]

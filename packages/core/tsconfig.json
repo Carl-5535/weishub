@@ -3,7 +3,9 @@
   "compilerOptions": {
     "composite": true,
     "rootDir": "src",
-    "outDir": "lib"
+    "outDir": "lib",
+    "resolveJsonModule": true
   },
-  "include": ["src"]
+  "include": ["src", "src/**/*.json"],
+  "references": [{ "path": "../channel-wechat" }]
 }

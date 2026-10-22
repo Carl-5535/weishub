@@ -9,5 +9,8 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     }
+  },
+  "dependencies": {
+    "@weishub/channel-wechat": "0.1.0"
   }
 }
