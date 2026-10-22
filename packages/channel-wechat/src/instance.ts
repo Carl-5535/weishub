@@ -6,7 +6,7 @@
  *   持锁进程存活时拒绝二次加锁，进程已死（或锁损坏）时接管重写。
  */
 
-import { readFile, unlink } from 'node:fs/promises'
+import { readFile, stat, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { dataDir, defaultCredentialPath, pathExists, readCredential, writePrivateJson } from './store.js'
@@ -39,6 +39,39 @@ export async function migrateLegacyCredential(): Promise<string | null> {
 export interface HubLock {
   /** 释放锁：仅在锁仍归自己所有时移除锁文件。 */
   release(): Promise<void>
+}
+
+/**
+ * 检测旧插件是否仍在运行（会和 hub 抢同一条 getupdates 流）。
+ *
+ * iLink 的长轮询只允许一个消费者：两个进程同时轮询时消息会被随机一方取走，
+ * 表现为「消息发了但没反应」，极难自行排查。这里通过「旧状态文件的修改时间
+ * 是否刚刚更新」来推断——旧插件每次收信都会落盘。
+ *
+ * @param windowMs 判定为「正在活动」的时间窗，默认 2 分钟
+ * @returns 疑似活动时的描述；不活动返回 null
+ */
+export async function detectLegacyPluginActivity(
+  windowMs = 120_000,
+  now = Date.now(),
+): Promise<{ statePath: string; idleMs: number } | null> {
+  return detectLegacyPluginActivityAt(join(homedir(), '.dsh', 'wechat-gateway', 'state.json'), windowMs, now)
+}
+
+/** 同上，但状态文件路径可注入（测试用）。 */
+export async function detectLegacyPluginActivityAt(
+  statePath: string,
+  windowMs: number,
+  now: number,
+): Promise<{ statePath: string; idleMs: number } | null> {
+  try {
+    const { mtimeMs } = await stat(statePath)
+    const idleMs = now - mtimeMs
+    if (idleMs > windowMs) return null
+    return { statePath, idleMs }
+  } catch {
+    return null
+  }
 }
 
 interface LockContent {

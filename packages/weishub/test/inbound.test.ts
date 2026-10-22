@@ -685,16 +685,49 @@ test('凭据健康：收信即续期——过期凭据收到消息后回到 ok',
   expect(kit.hub.credentialHealth.state).toBe('ok')
 })
 
-test('凭据健康：poll 报鉴权错时标记 rejected，重新扫码后清除', async () => {
+test('凭据健康：轮询遇鉴权错时标记 rejected，重新扫码后清除', async () => {
   await writeCredential()
   const kit = makeHub()
   await kit.hub.start()
-  kit.client.poll = (async () => { throw new Error('微信 HTTP 401: unauthorized') }) as HubDeps['client']['poll']
-  const health = await kit.hub.checkCredential()
-  expect(health.state).toBe('rejected')
-  // 重新读取凭据（等价于重新扫码后落盘的新凭据）应清除拒绝状态
+  kit.client.poll = (async () => { throw new Error('getupdates 失败 (ret=0, errcode=-14): session timeout') }) as HubDeps['client']['poll']
+  // tick 会吞掉异常，但循环体里的标记逻辑要先于这一步——直接跑一次主循环的 poll 路径
+  await kit.hub.tick()
+  expect(kit.hub.credentialHealth.state).toBe('rejected')
   await kit.hub.reloadCredential()
-  expect(kit.hub.credentialHealth.state).not.toBe('rejected')
+  expect(kit.hub.credentialHealth.state).not.toBe('missing')
+})
+
+test('凭据检查不消费消息、不推进游标（探活绝不能抢主循环的 getupdates）', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  // 队列里放一条待收消息
+  kit.polls.push([msg({ id: 'pending-1', text: '这条必须被主循环收到' })])
+  const pollSpy = kit.client.poll as unknown as { mock: { calls: unknown[] } }
+  const before = pollSpy.mock.calls.length
+  // 反复检查健康状态：不得触发任何 poll
+  for (let i = 0; i < 5; i += 1) await kit.hub.checkCredential()
+  expect(pollSpy.mock.calls.length).toBe(before)
+  // 消息仍在，主循环一跑就能拿到
+  await kit.hub.tick()
+  expect(kit.calls.some((c) => c.options.prompt.includes('这条必须被主循环收到'))).toBe(true)
+})
+
+test('重新扫码后换用新凭据构造的 client（旧 client 的 token 已固化）', async () => {
+  await writeCredential()
+  const seen: string[] = []
+  let kitRef: HubKit | undefined
+  const kit = makeHub({
+    createClient: () => {
+      seen.push('rebuilt')
+      return kitRef!.client
+    },
+  })
+  kitRef = kit
+  await kit.hub.start()
+  expect(seen).toHaveLength(0) // 启动时用 deps.client，不重建
+  await kit.hub.reloadCredential()
+  expect(seen).toEqual(['rebuilt']) // 重新扫码后必须换 client
 })
 
 test('凭据健康：网络抖动不改变本地推算结论', async () => {

@@ -23,6 +23,7 @@ import { parseArgs } from 'node:util'
 import {
   acquireHubLock,
   dataDir,
+  detectLegacyPluginActivity,
   defaultCredentialPath,
   login as terminalLogin,
   migrateLegacyCredential,
@@ -106,6 +107,15 @@ export async function serve(
   await preflight.release()
 
   await migrateLegacyCredential()
+  // 旧 dsh 微信插件若还在跑，会和 hub 抢同一条 getupdates 流（消息被它吃掉，表现为「发了没反应」）
+  const legacyActive = await detectLegacyPluginActivity()
+  if (legacyActive !== null) {
+    stderr.write(
+      `警告：检测到旧微信插件仍在活动（${legacyActive.statePath} 在 ${Math.round(legacyActive.idleMs / 1000)} 秒前被写入）。\n`
+      + '      iLink 长轮询只允许一个消费者，两者同时运行会导致消息被随机一方取走。\n'
+      + '      请先停掉 dsh web（或禁用其 wechat 插件）再使用微枢。\n',
+    )
+  }
   const credentialPath = defaultCredentialPath()
   let credential = await readCredentialLoose(credentialPath)
 

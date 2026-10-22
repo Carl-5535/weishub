@@ -7,7 +7,7 @@
 
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { defaultCredentialPath, ILinkClient, readCredential } from '@weishub/channel-wechat'
+import { defaultCredentialPath, ILinkClient, readCredential, type StoredCredential } from '@weishub/channel-wechat'
 import { discoverAgents, loadAgentConfigs } from '@weishub/core'
 import { Hub, loadPersistedProtocol, type HubDeps } from './inbound.js'
 
@@ -42,15 +42,19 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
   // client 侧状态变化回写 Hub 的持久化链（hub 先声明再赋值，绕开构造顺序环）
   const persistedProtocol = await loadPersistedProtocol()
   let hubRef: Hub | undefined
-  const client = new ILinkClient({
-    token: credential.token,
-    accountId: credential.accountId,
-    apiBase: credential.apiBase,
+  /** 按凭据构造通道 client（启动与重新扫码共用，token/账号都从这里来）。 */
+  const makeClient = (cred: StoredCredential): ILinkClient => new ILinkClient({
+    token: cred.token,
+    accountId: cred.accountId,
+    apiBase: cred.apiBase,
     state: persistedProtocol,
     onStateChange: (state) => hubRef?.recordProtocolState(state),
   })
+  const client = makeClient(credential)
   const hub = buildHub({
     client,
+    // 重新扫码后 token 变了：用新凭据重建 client，否则轮询还拿旧 token 请求
+    createClient: makeClient,
     accountId: credential.accountId,
     ownerUserId: credential.userId ?? credential.accountId,
     agents,

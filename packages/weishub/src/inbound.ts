@@ -58,6 +58,11 @@ import {
 
 export interface HubDeps {
   client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
+  /**
+   * 用新凭据重建通道 client（重新扫码后必须换掉旧的——token 在构造时固化）。
+   * 不传则沿用 deps.client（测试/无登录场景）。
+   */
+  createClient?: (credential: StoredCredential) => Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
   accountId: string
   ownerUserId: string
   agents: AgentConfig[]
@@ -163,19 +168,22 @@ export class Hub {
   #lock: HubLock | undefined
   #stopped = false
   #loopStarted = false
+  /** 上一轮轮询是否失败（决定主循环要不要退避） */
+  #lastRoundFailed = false
   /** Web 面板设置的工作目录覆盖（per-agent 优先于 agent 配置，再优先于全局） */
   #workspaceOverride: { global?: string; perAgent?: Record<string, string> } = {}
   /** 唯一启用的 agent（未设置时退回第一个已发现的 agent） */
   #enabledAgent: string | undefined
-  readonly #pollAbort = new AbortController()
+  /** 轮询中止控制器：重启循环时换新的（旧的 abort 后不可复用） */
+  #pollAbort = new AbortController()
   /** 状态写入串行化：并发事件共享一条写入链，stop 时等待尾部写入完成 */
   #persistChain: Promise<void> = Promise.resolve()
   /** iLink 协议状态（轮询游标 + context token）：client onStateChange 喂入，随状态落盘 */
   #protocol: ILinkState | undefined
+  /** 当前生效的通道 client（重新扫码后会整体换成用新 token 构造的实例） */
+  #client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
   /** 发件箱兜底重试定时器（stop 时清除） */
   #outboxRetryTimer: ReturnType<typeof setInterval> | undefined
-  /** 凭据健康检查定时器（stop 时清除） */
-  #credentialTimer: ReturnType<typeof setInterval> | undefined
   /** 最近一次收到微信消息的时间（ISO）——收信即续期，是到期推算的锚点 */
   #lastActivityAt: string | undefined
   /** 服务端明确拒绝过凭据（重新扫码后清除） */
@@ -183,6 +191,7 @@ export class Hub {
 
   constructor(deps: HubDeps) {
     this.#deps = deps
+    this.#client = deps.client
     this.#notifyToken = deps.notifyToken ?? randomBytes(24).toString('hex')
     this.approvals = new ApprovalRouter()
     this.outbox = new Outbox({
@@ -236,50 +245,32 @@ export class Hub {
   }
 
   /**
-   * 主动核实凭据是否仍被服务端接受。
-   * 用一个短超时的 getupdates 探测：失效 token 会立刻以鉴权错误返回；
-   * 有效 token 则会挂起（长轮询常态）——**超时即视为有效**，这正是我们要的信号。
+   * 凭据核实。
+   *
+   * **不能用 poll() 探活**：iLink 的游标（get_updates_buf）在 client 内共享，
+   * 一次探测性 poll 会消费掉本属于主循环的消息、并推进游标让主循环跳过它们
+   * ——那是实打实的丢消息。
+   *
+   * 实际上也不需要探测：主循环每次 getupdates 都在验证 token，
+   * 失败时自己会标记 rejected（见 #startLoop）。这里只做本地推算，
+   * 保证启动瞬间（循环还没跑起来）也有结论。
    */
   async checkCredential(): Promise<CredentialHealth> {
-    if (this.#credential === undefined) return { state: 'missing' }
-    const local = this.credentialHealth
-    // 本地已判定被拒绝，无需再打扰服务端
-    if (local.state === 'rejected') return local
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 8_000)
-    try {
-      await this.#deps.client.poll(controller.signal)
-      // 拿到了一批消息（可能为空）：凭据有效
-      this.#credentialRejected = undefined
-      this.#lastActivityAt = new Date().toISOString()
-    } catch (error) {
-      // 探测超时 = 长轮询正常挂起 = 凭据被接受
-      const timedOut = controller.signal.aborted
-      if (!timedOut && isCredentialRejection(error) && !this.#stopped) {
-        this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
-        await this.#persistState().catch(() => undefined)
-      }
-      // 其余（网络抖动、超时）不改变结论
-    } finally {
-      clearTimeout(timer)
-    }
     return this.credentialHealth
   }
 
+  /**
+   * 启动时报一次凭据状态（本地推算 + 已持久化的拒绝结论）。
+   * 不做定时探活：主循环的每次 getupdates 就是最强的探活，
+   * 额外的探针只会和它抢游标（见 checkCredential 的注释）。
+   */
   #startCredentialCheck(): void {
-    // 启动即查一次（不等第一个轮询周期），失效时在终端明确告知——用户不看面板也能知道
-    void this.checkCredential().then((health) => {
-      if (health.state === 'rejected') {
-        process.stderr.write(`微枢：微信凭据已失效（${health.reason}），请重新扫码登录\n`)
-      } else if (health.state === 'expired') {
-        process.stderr.write('微枢：微信凭据已过期，主动推送将失败；发一条消息即可续期\n')
-      }
-    }).catch(() => undefined)
-    this.#credentialTimer = setInterval(() => {
-      if (this.#stopped) return
-      void this.checkCredential().catch(() => undefined)
-    }, CREDENTIAL_CHECK_INTERVAL_MS)
-    this.#credentialTimer.unref?.()
+    const health = this.credentialHealth
+    if (health.state === 'rejected') {
+      process.stderr.write(`微枢：微信凭据已失效（${health.reason}），请重新扫码登录\n`)
+    } else if (health.state === 'expired') {
+      process.stderr.write('微枢：微信凭据已过期，主动推送将失败；发一条消息即可续期\n')
+    }
   }
 
   /** owner 白名单 id（Web 面板以 owner 身份注入消息用）。 */
@@ -380,11 +371,15 @@ export class Hub {
       this.#credential = fresh
       this.#credentialRejected = undefined
       this.#lastActivityAt = new Date().toISOString()
+      // token 在 client 构造时固化，换了凭据必须换 client，否则循环重跑也用旧 token
+      if (this.#deps.createClient !== undefined) this.#client = this.#deps.createClient(fresh)
     } catch {
       return this.#credential !== undefined
     }
-    if (!this.#stopped && !this.#loopStarted) this.#startLoop()
-    if (!this.#stopped && this.#credentialTimer === undefined) this.#startCredentialCheck()
+    // 旧循环可能正卡在「凭据失效」的长退避里，且它捕获的是旧 client。
+    // 这里重启循环：先中止旧的，再起一条新的（pollAbort 不能复用，重建一个）。
+    if (!this.#stopped) this.#restartLoop()
+    if (!this.#stopped) this.#startCredentialCheck()
     await this.#persistState().catch(() => undefined)
     return true
   }
@@ -406,8 +401,8 @@ export class Hub {
     this.#notify = await startNotifyApi({
       token: this.#notifyToken,
       ownerChatId: this.#deps.ownerUserId,
-      sendText: (text) => this.#sendOutbound(() => this.#deps.client.sendText(this.#deps.ownerUserId, text)),
-      sendImage: (name, bytes) => this.#sendOutbound(() => this.#deps.client.sendMedia(this.#deps.ownerUserId, name, bytes)),
+      sendText: (text) => this.#sendOutbound(() => this.#client.sendText(this.#deps.ownerUserId, text)),
+      sendImage: (name, bytes) => this.#sendOutbound(() => this.#client.sendMedia(this.#deps.ownerUserId, name, bytes)),
       outbox: this.outbox,
       approvals: this.approvals,
       getLoggedIn: () => this.#credential !== undefined,
@@ -437,7 +432,6 @@ export class Hub {
   async stop(): Promise<void> {
     this.#stopped = true
     if (this.#outboxRetryTimer !== undefined) clearInterval(this.#outboxRetryTimer)
-    if (this.#credentialTimer !== undefined) clearInterval(this.#credentialTimer)
     // 关机先停任务：中止所有在跑 agent 进程树、丢弃队列（不执行新任务），再做收尾持久化
     this.dispatcher.stopAll()
     this.#pollAbort.abort()
@@ -475,10 +469,32 @@ export class Hub {
 
   /** 手动推进一次轮询（测试接缝，主循环同一实现）；单次异常静默返回，循环不退出。 */
   async tick(): Promise<void> {
+    await this.#pollRound(this.#pollAbort.signal)
+  }
+
+  /**
+   * 一次完整轮询（成功/失败的全部状态维护都在这里）：
+   * 主循环与 tick() 共用，避免两条路径的健康状态判断走偏。
+   * 只吞异常不抛出——调用方决定是否退避。
+   */
+  async #pollRound(signal: AbortSignal): Promise<void> {
+    this.#lastRoundFailed = false
     try {
-      await this.#pollOnce()
-    } catch {
-      // 与主循环同语义：单次失败只退避重试，绝不退出循环
+      await this.#pollOnce(signal)
+      // 一次成功的轮询说明凭据被接受；若此前标记过拒绝，这里清除
+      if (this.#credentialRejected !== undefined) {
+        this.#credentialRejected = undefined
+        await this.#persistState().catch(() => undefined)
+      }
+    } catch (error) {
+      this.#lastRoundFailed = true
+      if (this.#stopped || signal.aborted) return
+      // 鉴权失败必须让状态可见，否则只是无限退避重试、面板一直显示「已连接」
+      if (isCredentialRejection(error) && this.#credentialRejected === undefined) {
+        this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
+        await this.#persistState().catch(() => undefined)
+        process.stderr.write(`微枢：微信凭据已失效（${this.#credentialRejected}），请重新扫码\n`)
+      }
     }
   }
 
@@ -756,24 +772,14 @@ export class Hub {
 
   #startLoop(): void {
     this.#loopStarted = true
+    const abort = this.#pollAbort
     void (async () => {
-      while (!this.#stopped) {
-        try {
-          await this.#pollOnce()
-          // 一次成功的轮询说明凭据被接受；若此前标记过拒绝，这里清除
-          if (this.#credentialRejected !== undefined) {
-            this.#credentialRejected = undefined
-            await this.#persistState().catch(() => undefined)
-          }
-        } catch (error) {
-          if (this.#stopped) return
-          // 鉴权失败必须让状态可见，否则只是无限退避重试、面板一直显示「已连接」
-          if (isCredentialRejection(error) && this.#credentialRejected === undefined) {
-            this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
-            await this.#persistState().catch(() => undefined)
-            // 首次发现失效时吼一声，便于在不看面板时也知道
-            process.stderr.write(`微枢：微信凭据已失效（${this.#credentialRejected}），请重新扫码\n`)
-          }
+      while (!this.#stopped && !abort.signal.aborted) {
+        await this.#pollRound(abort.signal)
+        if (this.#stopped || abort.signal.aborted) return
+        // pollRound 从不抛出：成功时会立刻进入下一轮（长轮询本身就是等待），
+        // 失败时按凭据状态决定退避时长。
+        if (this.#lastRoundFailed) {
           await new Promise<void>((resolve) => {
             // 凭据已失效时不必每 3 秒重试一次：降频到 1 分钟，等用户重新扫码
             const wait = this.#credentialRejected !== undefined ? CREDENTIAL_CHECK_INTERVAL_MS : POLL_BACKOFF_MS
@@ -785,8 +791,18 @@ export class Hub {
     })()
   }
 
-  async #pollOnce(): Promise<void> {
-    const messages = await this.#deps.client.poll(this.#pollAbort.signal)
+  /**
+   * 重启轮询循环（重新扫码后调用）：旧循环可能正卡在长退避里、
+   * 且它持有的是用旧 token 构造的 client。先中止旧的再起新的。
+   */
+  #restartLoop(): void {
+    this.#pollAbort.abort()
+    this.#pollAbort = new AbortController()
+    this.#startLoop()
+  }
+
+  async #pollOnce(signal: AbortSignal): Promise<void> {
+    const messages = await this.#client.poll(signal)
     for (const message of messages) {
       if (this.#stopped) return
       await this.handleInbound(message)

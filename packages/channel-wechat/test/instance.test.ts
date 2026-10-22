@@ -2,14 +2,14 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { mkdtemp, stat, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
   defaultCredentialPath,
   pathExists,
   writePrivateJson,
   type StoredCredential,
 } from '../src/store.js'
-import { acquireHubLock, migrateLegacyCredential } from '../src/instance.js'
+import { acquireHubLock, detectLegacyPluginActivityAt, migrateLegacyCredential } from '../src/instance.js'
 
 // 让 homedir() 指到临时目录，避免读写真实的 ~/.dsh
 const mocks = vi.hoisted(() => ({ home: '' }))
@@ -138,4 +138,23 @@ test('release() 移除锁文件且只移除自己持有的锁', async () => {
   const own = await acquireHubLock()
   await own.release()
   expect(await pathExists(lockPath)).toBe(false)
+})
+
+describe('detectLegacyPluginActivity', () => {
+  test('旧状态文件刚被写入时判定为活动', async () => {
+    const statePath = join(workDir, 'legacy-state.json')
+    await writeFile(statePath, '{}')
+    // 用注入的 now 与真实 mtime 比较：刚写完必然在窗口内
+    const real = Date.now()
+    const hit = await detectLegacyPluginActivityAt(statePath, 120_000, real)
+    expect(hit).not.toBeNull()
+    // 远未来：已超出窗口
+    const stale = await detectLegacyPluginActivityAt(statePath, 120_000, real + 10 * 60_000)
+    expect(stale).toBeNull()
+  })
+
+  test('状态文件不存在时返回 null（没有旧插件）', async () => {
+    const hit = await detectLegacyPluginActivityAt('/nonexistent/path/state.json', 120_000, Date.now())
+    expect(hit).toBeNull()
+  })
 })
