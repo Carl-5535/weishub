@@ -416,3 +416,98 @@ test('onReply 自身拒绝不会让 submit 抛出或卡死队列', async () => {
   await vi.waitFor(() => expect(fake.calls).toHaveLength(2))
   await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
 })
+
+test('onReply 永不 settle 时队列仍推进（回复超时兜底）', async () => {
+  vi.useFakeTimers()
+  try {
+    const fake = instantRun()
+    const { deps } = makeDeps(fake.run, {
+      onReply: () => new Promise<void>(() => {}),
+    })
+    const d = new ChatDispatcher(deps)
+    d.bind('c1', 'claude')
+    expect(d.submit('c1', '一')).toBe('accepted')
+    expect(d.submit('c1', '二')).toBe('queued')
+    // 越过 REPLY_TIMEOUT_MS 后，挂死的回复被放行，队列继续
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fake.calls.map((c) => c.options.prompt)).toEqual(['一', '二'])
+    // 第二个任务的挂死回复同样被超时放行后会话回到空闲
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(d.busy('c1')).toBe(false)
+    expect(d.stop('c1')).toBe(false)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('stop 中止当前任务后，排队任务仍按序执行', async () => {
+  let callIndex = 0
+  const run = vi.fn((config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
+    void config
+    if (callIndex++ === 0) {
+      // 首个任务模拟真 runAgentTask：abort 即 reject
+      return new Promise<TaskResult>((_, reject) => {
+        options.signal?.addEventListener('abort', () => reject(new Error('中止')), { once: true })
+      })
+    }
+    return Promise.resolve({ text: `答${options.prompt}`, exitCode: 0 })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  expect(d.submit('c1', '一')).toBe('accepted')
+  expect(d.submit('c1', '二')).toBe('queued')
+  expect(d.submit('c1', '三')).toBe('queued')
+  expect(d.stop('c1')).toBe(true)
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(run).toHaveBeenCalledTimes(3)
+  // 被中止的首任务不发「任务失败」，只发「已中止」；排队任务照常回复
+  expect(replies.map((r) => r.text)).toEqual(['已中止', '答二', '答三'])
+})
+
+test('队列有任务时 rebind 到另一 agent：排队任务换 agent 执行且旧 sessionId 失效', async () => {
+  const first = deferred()
+  const run = vi.fn((config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
+    void options
+    if (config.name === 'claude') return first.promise
+    return Promise.resolve({ text: `codex 答`, exitCode: 0 })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.setSession('c1', 's-old')
+  expect(d.submit('c1', '一')).toBe('accepted')
+  expect(d.submit('c1', '二')).toBe('queued')
+  // 任务一还在跑时 rebind：sessionId 立即重置
+  d.bind('c1', 'codex')
+  expect(d.binding('c1')?.sessionId).toBeUndefined()
+  first.resolve({ text: '答一', exitCode: 0 }) // 不产生新 sessionId
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(run).toHaveBeenCalledTimes(2)
+  // 排队任务在 codex 配置下执行，且不带被重置前的旧会话
+  expect(run.mock.calls[1]![0].name).toBe('codex')
+  expect(run.mock.calls[1]![1].sessionId).toBeUndefined()
+  expect(run.mock.calls[1]![1].cwd).toBe('/cwd/codex')
+  expect(replies.map((r) => r.text)).toEqual(['答一', 'codex 答'])
+})
+
+test('同一聊天连续两次 stop 只中止一次，只回复一条「已中止」', async () => {
+  const { run, calls } = makeFakeRun((call) => {
+    return new Promise<TaskResult>((_, reject) => {
+      call.options.signal?.addEventListener('abort', () => reject(new Error('中止')), {
+        once: true,
+      })
+    })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.submit('c1', '长任务')
+  await drain()
+  expect(d.stop('c1')).toBe(true)
+  // 任务尚未 settle（running 仍真），第二次 stop 被 aborted 守卫拦下
+  expect(d.stop('c1')).toBe(false)
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(calls).toHaveLength(1)
+  expect(replies.filter((r) => r.text === '已中止')).toHaveLength(1)
+})

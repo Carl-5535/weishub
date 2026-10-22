@@ -23,6 +23,9 @@ interface ChatState {
   abort: AbortController | undefined
 }
 
+/** 单条回复的兜底时限：onReply 永不 settle 时超时放行，宁可丢一条回复也不卡死会话队列。 */
+const REPLY_TIMEOUT_MS = 120_000
+
 /**
  * 每 chat 的 agent 绑定与串行任务队列：同一 chat 任务严格按序执行（并发峰值 1），
  * 不同 chat 互不阻塞。会话恢复：首个任务不带 sessionId，之后把绑定里的 sessionId
@@ -98,8 +101,10 @@ export class ChatDispatcher {
   stop(chatId: string): boolean {
     const state = this.chats.get(chatId)
     if (!state || !state.running || state.abort === undefined) return false
+    // 已中止过则不再重复中止与回复（防连点导致多条「已中止」）
+    if (state.abort.signal.aborted) return false
     state.abort.abort()
-    void this.deps.onReply(chatId, '已中止').catch(() => {})
+    void this.reply(chatId, '已中止')
     return true
   }
 
@@ -116,7 +121,7 @@ export class ChatDispatcher {
     const config = this.agents.get(state.binding.agentName)
     if (!config) {
       // bind 校验过的 agent 不应缺失；防御性兜底，不抛出
-      void this.deps.onReply(chatId, `任务失败: 未知 agent（${state.binding.agentName}）`).catch(() => {})
+      void this.reply(chatId, `任务失败: 未知 agent（${state.binding.agentName}）`)
       this.finishAndDrain(chatId, state)
       return
     }
@@ -135,14 +140,14 @@ export class ChatDispatcher {
       .then((result: TaskResult) => {
         // 会话写回：失败路径不经过这里，sessionId 只在新会话产生时更新
         if (result.sessionId !== undefined) state.binding.sessionId = result.sessionId
-        if (result.text !== '') return this.deps.onReply(chatId, result.text)
+        if (result.text !== '') return this.reply(chatId, result.text)
         return undefined
       })
       .catch((err: unknown) => {
         // stop 主动中止时已回复「已中止」，避免重复报错
         if (!state.abort?.signal.aborted) {
           const message = err instanceof Error ? err.message : String(err)
-          return this.deps.onReply(chatId, `任务失败: ${message}`)
+          return this.reply(chatId, `任务失败: ${message}`)
         }
         return undefined
       })
@@ -150,6 +155,20 @@ export class ChatDispatcher {
         // onReply 自身失败也不能影响队列推进
       })
       .finally(() => this.finishAndDrain(chatId, state))
+  }
+
+  /**
+   * 回复通道：竞速一个兜底超时。onReply 永不 settle 时按时放行，
+   * 保证 .finally 驱动的队列持续推进（此方法从不 reject）。
+   */
+  private reply(chatId: string, text: string): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, REPLY_TIMEOUT_MS)
+    })
+    return Promise.race([this.deps.onReply(chatId, text).catch(() => {}), timeout]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer)
+    })
   }
 
   private finishAndDrain(chatId: string, state: ChatState): void {
