@@ -9,9 +9,9 @@
 
 import { readFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { dataDir } from '@weishub/channel-wechat'
+import { isEntrypoint } from './entrypoint.js'
 
 /** wx 连接 hub 所需的最小配置。 */
 export interface WxConfig {
@@ -208,10 +208,9 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
 }
 
-/* 直接以 `node wx.js` 运行时才执行主逻辑；测试 import 本模块时跳过。 */
-const isMain =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
-if (isMain) {
+/* 直接以 `node wx.js` 运行时才执行主逻辑；测试 import 本模块时跳过。
+   argv[1] 是符号链接（npm 全局 bin）时必须 realpath 后比较，见 ./entrypoint.js。 */
+if (isEntrypoint(process.argv[1], import.meta.url)) {
   void run(process.argv.slice(2)).then((code) => {
     process.exitCode = code
   })

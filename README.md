@@ -31,6 +31,8 @@
 # 1. 构建并全局安装（仓库根目录执行）
 npm run build
 npm install -g ./packages/weishub
+# 注意：这是 workspace 链接式安装——全局 bin 符号链接回本仓库目录，
+# 安装后不可移动/删除仓库目录；正式发布后将改用 npm registry 安装（v1 尚未发布）。
 
 # 2. 启动（首次没有凭据，会先给出面板地址，浏览器打开用手机微信扫码登录）
 weishub

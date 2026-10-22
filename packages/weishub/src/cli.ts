@@ -31,6 +31,7 @@ import {
   type InboundMessage,
 } from '@weishub/channel-wechat'
 import { discoverAgents, loadAgentConfigs } from '@weishub/core'
+import { isEntrypoint } from './entrypoint.js'
 import { buildHub, startServe, type ServeOptions } from './serve.js'
 import { startWebServer } from './web-server.js'
 
@@ -147,8 +148,16 @@ export async function serve(
     stdout.write('扫码成功，正在启动微枢…\n')
   }
 
-  // 正式装配：startServe 读凭据、建真实 ILinkClient 并 start Hub（正式加锁、起 notify api）
-  const hub = await startServe(options)
+  // 正式装配：startServe 读凭据、建真实 ILinkClient 并 start Hub（正式加锁、起 notify api）。
+  // bootstrap.stop() 释放锁与 hub.start() 重新加锁之间有缝隙：恰好被别的实例抢锁时重试一次。
+  let hub
+  try {
+    hub = await startServe(options)
+  } catch (error) {
+    if (!(error instanceof Error && error.message.includes('另一个 weishub 实例正在运行'))) throw error
+    await delay(1_000)
+    hub = await startServe(options)
+  }
 
   // wx CLI 的连接配置：token 随机 32 字节十六进制；notify-port 取 Hub 实际监听端口
   const token = randomBytes(32).toString('hex')
@@ -227,12 +236,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     process.stderr.write(`${usage()}\n`)
     return 1
   }
-  /** parseArgs 宽泛 values 中的字符串项（严格模式下单值必为 string）。 */
-function stringValue(value: string | boolean | readonly (string | boolean)[] | undefined): string | undefined {
-  return typeof value === 'string' ? value : undefined
-}
-
-let options: ServeOptions
+  let options: ServeOptions
   try {
     options = {
       workspace: stringValue(parsed.values.workspace),
@@ -252,10 +256,14 @@ let options: ServeOptions
   }
 }
 
-/* 直接以 `node cli.js` 运行时才执行主逻辑；测试 import 本模块时跳过。 */
-const isMain =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
-if (isMain) {
+/** parseArgs 宽泛 values 中的字符串项（严格模式下单值必为 string）。 */
+function stringValue(value: string | boolean | readonly (string | boolean)[] | undefined): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+/* 直接以 `node cli.js` 运行时才执行主逻辑；测试 import 本模块时跳过。
+   argv[1] 是符号链接（npm 全局 bin）时必须 realpath 后比较，见 ./entrypoint.js。 */
+if (isEntrypoint(process.argv[1], import.meta.url)) {
   void run(process.argv.slice(2)).then((code) => {
     process.exitCode = code
   })
