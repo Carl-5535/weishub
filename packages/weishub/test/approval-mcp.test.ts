@@ -27,14 +27,20 @@ beforeAll(async () => {
           res.writeHead(404).end()
           return
         }
+        // 'slow' 走 timeout 结果路径，其余走 allow
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ id: 'ap-1' }))
+        res.end(JSON.stringify({ id: parsed.tool === 'slow' ? 'ap-2' : 'ap-1' }))
       })
       return
     }
     if (req.method === 'GET' && req.url === '/approvals/result/ap-1') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ result: 'allow' }))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/approvals/result/ap-2') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ result: 'timeout' }))
       return
     }
     res.writeHead(404).end()
@@ -110,30 +116,50 @@ test('initialize 与 tools/list 返回合法 JSON-RPC 结果，tools/list 暴露
 
   const tools = responses.get(2)
   expect(tools).toBeDefined()
-  const toolList = (tools!.result! as { tools: { name: string }[] }).tools
-  expect(toolList.map((t) => t.name)).toContain('weishub_request_permission')
+  const tool = (tools!.result! as { tools: { name: string; inputSchema: { properties: Record<string, unknown>; required: string[] } }[] }).tools.find((t) => t.name === 'weishub_request_permission')
+  expect(tool).toBeDefined()
+  // chatId 可选：缺省回退 WEISHUB_CHAT_ID
+  expect(tool!.inputSchema.required).toEqual(expect.arrayContaining(['tool_name', 'input']))
+  expect(tool!.inputSchema.required).not.toContain('chatId')
+  expect(tool!.inputSchema.properties.tool_name).toBeDefined()
+  expect(tool!.inputSchema.properties.input).toBeDefined()
 })
 
-test('tools/call 透传：hub 返回 allow，MCP 内容 behavior=allow', async () => {
-  const responses = await callMcp(mcpEnv(), [
-    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { chatId: 'chat-9', tool: 'Bash', input: 'ls' } } } },
+test('tools/call：hub allow → behavior=allow 且 updatedInput 原样回显；chatId 缺省回退 WEISHUB_CHAT_ID', async () => {
+  const env = { ...mcpEnv(), WEISHUB_CHAT_ID: 'chat-env' }
+  const responses = await callMcp(env, [
+    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { tool_name: 'Bash', input: { command: 'ls -la' } } } } },
   ])
   const resp = responses.get(1)
   expect(resp).toBeDefined()
   expect(resp!.result).toBeDefined()
   const content = (resp!.result! as { content: { type: string; text: string }[] }).content
   expect(Array.isArray(content)).toBe(true)
-  const behavior = JSON.parse(content[0].text) as { behavior: string }
-  expect(behavior.behavior).toBe('allow')
+  const decision = JSON.parse(content[0].text) as { behavior: string; updatedInput?: unknown }
+  expect(decision.behavior).toBe('allow')
+  expect(decision.updatedInput).toEqual({ command: 'ls -la' })
 })
 
-test('hub 返回 404 时 MCP 以 behavior=deny 兜底', async () => {
+test('hub 返回 timeout → MCP 层映射为 behavior=deny 并带超时说明', async () => {
   const responses = await callMcp(mcpEnv(), [
-    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { chatId: 'chat-9', tool: 'boom', input: 'x' } } } },
+    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { tool_name: 'slow', input: {}, chatId: 'chat-9' } } } },
   ])
   const resp = responses.get(1)
   expect(resp).toBeDefined()
   const content = (resp!.result! as { content: { type: string; text: string }[] }).content
-  const behavior = JSON.parse(content[0].text) as { behavior: string }
-  expect(behavior.behavior).toBe('deny')
+  const decision = JSON.parse(content[0].text) as { behavior: string; message?: string }
+  expect(decision.behavior).toBe('deny')
+  expect(decision.message).toContain('超时')
+})
+
+test('hub 返回 404 时 MCP 以 behavior=deny 兜底', async () => {
+  const responses = await callMcp(mcpEnv(), [
+    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { tool_name: 'boom', input: { x: 1 }, chatId: 'chat-9' } } } },
+  ])
+  const resp = responses.get(1)
+  expect(resp).toBeDefined()
+  const content = (resp!.result! as { content: { type: string; text: string }[] }).content
+  const decision = JSON.parse(content[0].text) as { behavior: string; message?: string }
+  expect(decision.behavior).toBe('deny')
+  expect(typeof decision.message).toBe('string')
 })

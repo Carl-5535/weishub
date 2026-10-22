@@ -15,17 +15,24 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        chatId: { type: 'string', description: '发起任务的微信 chat id' },
-        tool: { type: 'string', description: '被审批的工具名' },
-        input: { type: 'string', description: '工具入参（JSON 字符串）' },
+        tool_name: { type: 'string', description: 'Claude Code 请求调用的工具名' },
+        input: { type: 'object', description: '工具入参对象，原样透传给 hub 并在 allow 时回显为 updatedInput' },
+        chatId: {
+          type: 'string',
+          description: '可选，发起任务的微信 chat id；缺省回退 WEISHUB_CHAT_ID 环境变量',
+        },
       },
-      required: ['chatId', 'tool', 'input'],
+      required: ['tool_name', 'input'],
     },
   },
 ]
 
 function reply(id: unknown, result: unknown): void {
   process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`)
+}
+
+function behaviorReply(id: unknown, decision: Record<string, unknown>): void {
+  reply(id, { content: [{ type: 'text', text: JSON.stringify(decision) }] })
 }
 
 async function hub(path: string, init?: RequestInit): Promise<unknown> {
@@ -37,7 +44,7 @@ async function hub(path: string, init?: RequestInit): Promise<unknown> {
   return res.json()
 }
 
-async function requestPermission(args: { chatId: string; tool: string; input: string }): Promise<Behavior> {
+async function requestPermission(args: { chatId: string; tool: string; input: unknown }): Promise<Behavior> {
   try {
     const { id } = (await hub('/approvals/request', {
       method: 'POST',
@@ -64,30 +71,47 @@ async function dispatch(id: unknown, method: string, params: Record<string, unkn
   } else if (method === 'tools/list') {
     reply(id, { tools: TOOLS })
   } else if (method === 'tools/call') {
-    const { name, arguments: args } = params as { name: string; arguments?: Record<string, string> }
+    const { name, arguments: args } = params as { name: string; arguments?: Record<string, unknown> }
     if (name !== 'weishub_request_permission') {
-      reply(id, { content: [{ type: 'text', text: JSON.stringify({ behavior: 'deny' }) }] })
+      behaviorReply(id, { behavior: 'deny', message: `未知工具: ${name}` })
       return
     }
-    const behavior = await requestPermission({
-      chatId: String(args?.chatId ?? ''),
-      tool: String(args?.tool ?? ''),
-      input: String(args?.input ?? ''),
-    })
-    reply(id, { content: [{ type: 'text', text: JSON.stringify({ behavior }) }] })
+    // Claude Code 传 tool_name + input 对象；chatId 由 serve 层经 WEISHUB_CHAT_ID 注入，显式传参优先
+    const toolName = String(args?.tool_name ?? args?.toolName ?? args?.tool ?? '')
+    const rawInput = args?.input
+    const chatId = String(args?.chatId ?? process.env.WEISHUB_CHAT_ID ?? '')
+    const outcome = await requestPermission({ chatId, tool: toolName, input: rawInput })
+    if (outcome === 'allow') {
+      behaviorReply(id, { behavior: 'allow', updatedInput: rawInput ?? {} })
+    } else {
+      behaviorReply(id, {
+        behavior: 'deny',
+        message: outcome === 'timeout' ? '审批超时' : '审批被拒绝或审批通道不可用',
+      })
+    }
   } else if (typeof id !== 'undefined') {
     process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32601, message: `未知方法: ${method}` } })}\n`)
   }
 }
 
-function handleLine(line: string, onSettled?: () => void): void {
-  const text = line.trim()
-  if (!text) return
+async function handleLine(line: string, onSettled?: () => void): Promise<void> {
   try {
+    const text = line.trim()
+    if (!text) return
     const msg = JSON.parse(text) as { id?: unknown; method?: string; params?: Record<string, unknown> }
-    if (msg.method) void dispatch(msg.id, msg.method, msg.params).finally(onSettled)
+    if (!msg.method) return
+    try {
+      await dispatch(msg.id, msg.method, msg.params)
+    } catch (err) {
+      // 意外 rejection 也回 deny，绝不让进程崩、计数不泄
+      if (typeof msg.id !== 'undefined') {
+        behaviorReply(msg.id, { behavior: 'deny', message: `审批桥内部错误: ${(err as Error).message}` })
+      }
+    }
   } catch (err) {
     process.stderr.write(`坏消息: ${(err as Error).message}\n`)
+  } finally {
+    onSettled?.()
   }
 }
 
