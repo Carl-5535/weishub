@@ -48,6 +48,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml',
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
@@ -106,6 +107,12 @@ export async function startWebServer(
       res.end()
       return
     }
+
+    // ---- 公共静态资源（无凭据也可访问：仅 logo，不含任何数据） ----
+    if ((req.method === 'GET' || req.method === 'HEAD') && path === '/icon.svg') {
+      return serveFile(res, 'icon.svg')
+    }
+
 
     // 鉴权先行：Bearer 头或 ?token= 查询参数任一命中即可。
     // 页面、静态资源、API 一视同仁——面板地址由 weishub 启动时打印（带 token）并在浏览器自动打开。
