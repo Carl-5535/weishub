@@ -1,5 +1,5 @@
 import { execSync, spawn } from 'node:child_process'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -16,6 +16,7 @@ let api: { port: number; close(): Promise<void> }
 let home: string
 let sentText: string[]
 let sentImages: Array<{ name: string; bytes: Uint8Array }>
+let outbox: Outbox
 /** 置 true 后下一次 sendText/sendImage 抛错（模拟通道未就绪 → 503），之后自动恢复 */
 let failing: boolean
 
@@ -54,6 +55,7 @@ beforeAll(async () => {
       retryDelayMs: 1,
     }),
   }
+  outbox = deps.outbox
   api = await startNotifyApi({ ...deps, port: 0 })
   home = await mkdtemp(join(tmpdir(), 'wx-home-'))
   await writeFile(join(home, 'token'), TOKEN)
@@ -130,11 +132,13 @@ test('服务端 503 时 stderr 输出中文错误（含 note）且 exit 1', asyn
   expect(imageResult.code).toBe(1)
   expect(imageResult.stderr).toContain('微信通道未就绪')
   expect(imageResult.stderr).toContain('图片未入队，请重试')
-  // 文本路径：503 只带 error，内容应入发件箱
+  // 文本路径：503 只带 error，内容应同步入发件箱（凭据过期不丢内容）
   failing = true
   const textResult = await runWx(['send', '会失败的一条'])
   expect(textResult.code).toBe(1)
   expect(textResult.stderr).toContain('微信通道未就绪')
+  const pending = Object.values(outbox.pending())
+  expect(pending.some((item) => item.chunks.includes('会失败的一条'))).toBe(true)
 })
 
 test('缺 token 文件时输出精确提示且 exit 1', async () => {
@@ -142,6 +146,10 @@ test('缺 token 文件时输出精确提示且 exit 1', async () => {
   const result = await runWx(['send', 'hi'], emptyHome)
   expect(result.code).toBe(1)
   expect(result.stderr.trim()).toBe('未找到 hub 令牌，请先启动 weishub')
+})
+
+test('编译产物首行是 shebang（npm i -g 后 wx 可执行的前提）', async () => {
+  expect(readFileSync(scriptPath, 'utf8').split('\n')[0]).toBe('#!/usr/bin/env node')
 })
 
 test('无参数或未知旗标 → 用法文本 exit 1', async () => {

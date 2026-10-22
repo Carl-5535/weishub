@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * wx：出站 CLI。任意 agent 都可以直接 `wx send "文本"` / `wx send --image <path>`
  * / `wx status`，与本地 hub 的 NotifyApi（127.0.0.1）交互推送微信通知。
