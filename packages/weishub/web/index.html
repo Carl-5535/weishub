@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微枢 · 本地面板</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "PingFang SC", sans-serif; margin: 0; background: #f5f6f8; color: #1c1e21; }
+  body.dark { background: #17181a; color: #e4e6eb; }
+  header { background: #2c3e50; color: #fff; padding: 10px 18px; font-size: 16px; }
+  main { max-width: 860px; margin: 0 auto; padding: 14px; display: grid; gap: 14px; }
+  section { background: #fff; border-radius: 8px; padding: 14px 16px; box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
+  body.dark section { background: #232427; }
+  h2 { margin: 0 0 10px; font-size: 15px; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 9px; background: #e8f0fe; color: #1a56b0; margin-left: 6px; vertical-align: 1px; }
+  body.dark .badge { background: #2b3a55; color: #9ec1ff; }
+  .badge.busy { background: #fdecec; color: #b03a1a; }
+  body.dark .badge.busy { background: #4a2a22; color: #ff9d7a; }
+  .badge.mode { background: #e9f7ee; color: #1c7c3c; }
+  body.dark .badge.mode { background: #23402e; color: #7fe0a1; }
+  #login { text-align: center; }
+  #qr-img { width: 220px; height: 220px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li.chat-item { padding: 8px 6px; border-bottom: 1px solid #eee; cursor: pointer; }
+  body.dark li.chat-item { border-color: #333; }
+  li.chat-item:hover, li.chat-item.sel { background: #eef4ff; }
+  body.dark li.chat-item:hover, body.dark li.chat-item.sel { background: #2a3140; }
+  #msg-list li { padding: 4px 0; font-size: 13px; word-break: break-all; }
+  #msg-list li.out { color: #555; }
+  body.dark #msg-list li.out { color: #aaa; }
+  #send-form { display: flex; gap: 8px; margin-top: 8px; }
+  input[type=text] { flex: 1; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  body.dark input[type=text] { background: #1b1c1e; color: inherit; border-color: #444; }
+  button { padding: 7px 14px; border: 0; border-radius: 6px; background: #2c6e49; color: #fff; cursor: pointer; font-size: 13px; }
+  button.secondary { background: #5a6472; }
+  button.deny { background: #b03a1a; }
+  .approval-card { border: 1px solid #f0d2b8; background: #fff8f0; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; }
+  body.dark .approval-card { background: #33281f; border-color: #5a4632; }
+  .approval-card pre { white-space: pre-wrap; word-break: break-all; margin: 6px 0; font-size: 12px; }
+  .approval-card .actions { display: flex; gap: 8px; margin-top: 6px; }
+  .ws-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .ws-row label { min-width: 80px; font-size: 13px; }
+  .ws-row input[type=text] { flex: 1; }
+  .muted { color: #888; font-size: 12px; }
+  .err { color: #b03a1a; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="root">
+  <header>微枢 · 本地面板</header>
+  <main>
+    <section id="login" hidden>
+      <h2>扫码登录</h2>
+      <img id="qr-img" alt="微信登录二维码">
+      <p id="qr-status">正在获取二维码…</p>
+      <button id="qr-refresh" class="secondary">刷新二维码</button>
+    </section>
+    <section id="approvals-sec">
+      <h2>待审批</h2>
+      <div id="approval-list"><p class="muted">暂无待审批</p></div>
+    </section>
+    <section id="chats-sec">
+      <h2>会话</h2>
+      <ul id="chat-list"></ul>
+      <div id="chat-detail" hidden>
+        <h3 id="chat-title"></h3>
+        <ul id="msg-list"></ul>
+        <form id="send-form">
+          <input type="text" id="send-text" placeholder="以 owner 身份插入一条消息…" autocomplete="off">
+          <button type="submit">发送</button>
+        </form>
+      </div>
+    </section>
+    <section id="workspace-sec">
+      <h2>工作目录</h2>
+      <div class="ws-row"><label for="ws-global">全局</label><input type="text" id="ws-global"></div>
+      <div id="ws-per"></div>
+      <button id="ws-save">保存</button>
+      <span id="ws-msg" class="muted"></span>
+    </section>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

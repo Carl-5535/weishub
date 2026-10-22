@@ -109,6 +109,9 @@ export class Hub {
   #notify: { port: number; close(): Promise<void> } | undefined
   #lock: HubLock | undefined
   #stopped = false
+  #loopStarted = false
+  /** Web 面板设置的工作目录覆盖（per-agent 优先于 agent 配置，再优先于全局） */
+  #workspaceOverride: { global?: string; perAgent?: Record<string, string> } = {}
   readonly #pollAbort = new AbortController()
   /** 状态写入串行化：并发事件共享一条写入链，stop 时等待尾部写入完成 */
   #persistChain: Promise<void> = Promise.resolve()
@@ -140,6 +143,57 @@ export class Hub {
   /** notify api 端口（start 后有效；测试断言审批桥 env 注入用）。 */
   get notifyPort(): number | undefined {
     return this.#notify?.port
+  }
+
+  /** 是否已持有登录凭据（Web 面板登录态展示用）。 */
+  get loggedIn(): boolean {
+    return this.#credential !== undefined
+  }
+
+  /** owner 白名单 id（Web 面板以 owner 身份注入消息用）。 */
+  get ownerUserId(): string {
+    return this.#deps.ownerUserId
+  }
+
+  /** 已发现可用 agent 名（Web 面板聊天列表徽标与工作目录表单用）。 */
+  get agents(): AgentConfig[] {
+    return this.#deps.agents
+  }
+
+  /** 当前工作目录配置（global 为生效默认值，perAgent 为覆盖表）。 */
+  getWorkspace(): { global: string; perAgent: Record<string, string> } {
+    return {
+      global: this.#workspaceOverride.global ?? this.#deps.workspace,
+      perAgent: { ...this.#workspaceOverride.perAgent },
+    }
+  }
+
+  /**
+   * Web 面板修改工作目录：立即生效（cwdFor 下次取值即新目录）并随状态落盘。
+   * 传 undefined 的字段保持不变；perAgent 传空对象即清空全部覆盖。
+   */
+  async setWorkspace(global?: string, perAgent?: Record<string, string>): Promise<void> {
+    if (global !== undefined) {
+      await mkdir(global, { recursive: true })
+      this.#workspaceOverride.global = global
+    }
+    if (perAgent !== undefined) this.#workspaceOverride.perAgent = { ...perAgent }
+    await this.#persistState()
+  }
+
+  /**
+   * Web 面板扫码确认后调用：重读凭据文件；首次拿到凭据时启动轮询循环
+   * （start 时的「等待扫码」空转由此转为正式轮询）。返回是否已登录。
+   */
+  async reloadCredential(): Promise<boolean> {
+    if (this.#credential !== undefined) return true
+    try {
+      this.#credential = await readCredential(defaultCredentialPath())
+    } catch {
+      return false
+    }
+    if (!this.#stopped && !this.#loopStarted) this.#startLoop()
+    return true
   }
 
   /**
@@ -286,8 +340,11 @@ export class Hub {
   }
 
   #cwdFor(agentName: string): string {
+    const override = this.#workspaceOverride.perAgent?.[agentName]
+    if (override !== undefined) return override
     const config = this.#deps.agents.find((a) => a.name === agentName)
-    return config?.workspace ?? this.#deps.workspace
+    if (config?.workspace) return config.workspace
+    return this.#workspaceOverride.global ?? this.#deps.workspace
   }
 
   /**
@@ -381,6 +438,7 @@ export class Hub {
         chats?: Record<string, { agentName: string; sessionId?: string }>
         modes?: Record<string, string>
         outbox?: Record<string, OutboxItem>
+        workspace?: { global?: string; perAgent?: Record<string, string> }
       }>(defaultStatePath())
       for (const [chatId, binding] of Object.entries(state.chats ?? {})) {
         if (this.dispatcher.bind(chatId, binding.agentName) !== undefined && binding.sessionId !== undefined) {
@@ -391,6 +449,16 @@ export class Hub {
         if (mode === 'auto' || mode === 'full') this.dispatcher.setMode(chatId, mode as PermissionMode)
       }
       if (state.outbox !== undefined) this.outbox.load(state.outbox)
+      // 工作目录覆盖：只接受合法形态，其余按无覆盖处理
+      const saved = state.workspace
+      if (typeof saved?.global === 'string' && saved.global !== '') this.#workspaceOverride.global = saved.global
+      if (saved?.perAgent !== undefined && typeof saved.perAgent === 'object' && !Array.isArray(saved.perAgent)) {
+        const perAgent: Record<string, string> = {}
+        for (const [name, dir] of Object.entries(saved.perAgent)) {
+          if (typeof dir === 'string' && dir !== '') perAgent[name] = dir
+        }
+        this.#workspaceOverride.perAgent = perAgent
+      }
     } catch {
       // 无状态或状态损坏：全新开始
     }
@@ -398,7 +466,15 @@ export class Hub {
 
   async #persistState(): Promise<void> {
     const snapshot = this.dispatcher.snapshot()
-    const value = { chats: snapshot.chats, modes: snapshot.modes, outbox: this.outbox.pending() }
+    const value = {
+      chats: snapshot.chats,
+      modes: snapshot.modes,
+      outbox: this.outbox.pending(),
+      workspace: {
+        ...(this.#workspaceOverride.global !== undefined ? { global: this.#workspaceOverride.global } : {}),
+        ...(this.#workspaceOverride.perAgent !== undefined ? { perAgent: this.#workspaceOverride.perAgent } : {}),
+      },
+    }
     const write = this.#persistChain.catch(() => undefined).then(async () => {
       try {
         await writePrivateJson(defaultStatePath(), value)
@@ -411,6 +487,7 @@ export class Hub {
   }
 
   #startLoop(): void {
+    this.#loopStarted = true
     void (async () => {
       while (!this.#stopped) {
         try {
