@@ -241,7 +241,14 @@
   .ws-foot { display: flex; align-items: center; gap: 12px; padding-top: 2px; }
 
   /* 扫码 */
+  #login-overlay {
+    position: fixed; inset: 0; margin: auto;
+    width: min(360px, 92vw); height: fit-content;
+    z-index: 10; box-shadow: 0 20px 60px rgb(0 0 0 / 18%);
+  }
+  .overlay-close { position: absolute; top: 6px; right: 6px; z-index: 1; }
   .qr-box { padding: 18px; display: grid; justify-items: center; gap: 12px; text-align: center; }
+  .qr-actions { display: flex; gap: 4px; }
   .qr-box img { width: 208px; height: 208px; border-radius: 6px; background: #fff; padding: 6px; }
   .qr-box .quote { max-width: 38ch; color: var(--slate); font-size: 12.5px; }
 
@@ -320,12 +327,20 @@
     </main>
   </div>
 
-  <div id="login-overlay" class="surface" hidden style="position:fixed;inset:0;margin:auto;width:min(360px,92vw);height:fit-content;z-index:10;box-shadow:0 20px 60px rgb(0 0 0 / 18%);">
+  <div id="login-overlay" class="surface" role="dialog" aria-labelledby="qr-title" hidden>
+    <button id="qr-close" class="icon-btn overlay-close" title="关闭" aria-label="关闭扫码框">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+        <path d="M6 6l12 12M18 6L6 18"/>
+      </svg>
+    </button>
     <div class="qr-box">
-      <h3>扫码登录微信</h3>
+      <h3 id="qr-title">扫码登录微信</h3>
       <img id="qr-img" alt="微信登录二维码">
       <p id="qr-status" class="quote">正在获取二维码…</p>
-      <button id="qr-refresh" class="quiet">换个二维码</button>
+      <div class="qr-actions">
+        <button id="qr-refresh" class="quiet">换个二维码</button>
+        <button id="qr-later" class="quiet">稍后再扫</button>
+      </div>
     </div>
   </div>
 

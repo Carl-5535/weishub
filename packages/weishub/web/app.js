@@ -10,6 +10,8 @@
   let selected = null         // 当前选中的 chatId
   let qrActive = false
   let qrTimerStarted = false
+  let qrAutoShown = false     // 本次「未登录」期间是否已自动弹过扫码框（只弹一次）
+  let qrDismissed = false     // 用户主动关掉过扫码框，不再自动弹回
   let msgFetchSeq = 0         // 消息流请求序号：慢响应不覆盖新选中的 chat
 
   function apiUrl(path) {
@@ -187,7 +189,10 @@
   }
 
   async function pollQr() {
-    if (!qrActive || !state || state.loggedIn) return
+    if (!qrActive || !state) return
+    // 已正常登录就不必再轮询；rejected/expired 时 loggedIn 仍为 true，必须继续轮询
+    const health = state.credential?.state
+    if (health !== undefined && health !== 'missing' && health !== 'rejected') return
     let r
     try {
       r = await api('/api/qr/poll')
@@ -199,13 +204,20 @@
       refresh()
     } else if (r.status === 'expired') {
       qrActive = false
-      $('qr-status').textContent = '二维码已过期'
+      $('qr-img').hidden = true
+      $('qr-status').textContent = '二维码已过期，点「换个二维码」重新获取'
     } else if (r.status === 'scanned') {
       $('qr-status').textContent = '已扫码，在手机上确认'
     } else if (r.status === 'needs-code' || r.status === 'code-blocked') {
       qrActive = false
       $('qr-status').textContent = '需要数字验证码，请改用命令行 weishub login'
     }
+  }
+
+  /** 扫码框关闭时停掉轮询，避免关掉后仍在后台打接口。 */
+  async function pollQrIfOpen() {
+    if ($('login-overlay').hidden) return
+    await pollQr()
   }
 
   // ---- 状态渲染 ----
@@ -222,14 +234,35 @@
     $('login-text').textContent = healthText(health)
     $('login-text').className = health.state === 'expiring' || health.state === 'expired' || health.state === 'rejected'
       ? 'status-warn' : ''
+
+    // 扫码框只在用户主动打开时显示，或本次会话还没登录过时自动弹。
+    // 一旦用户关掉，就不再自动弹回——状态栏与「重新扫码」按钮始终是入口。
     const needsLogin = health.state === 'missing' || health.state === 'rejected'
-    $('login-overlay').hidden = !needsLogin
-    if (needsLogin && !qrActive) void startQr()
+    if (needsLogin && !qrAutoShown && !qrDismissed) {
+      qrAutoShown = true
+      openQr()
+    }
+    if (!needsLogin) {
+      // 登录恢复：收起扫码框并复位，下次失效时允许再自动弹一次
+      qrAutoShown = false
+      qrDismissed = false
+      $('login-overlay').hidden = true
+    }
 
     renderEngines()
     renderApprovals()
     renderWorkspace()
     renderChats()
+  }
+
+  function openQr() {
+    $('login-overlay').hidden = false
+    if (!qrActive) void startQr()
+  }
+
+  function closeQr() {
+    $('login-overlay').hidden = true
+    qrDismissed = true
   }
 
   function healthText(health) {
@@ -473,10 +506,18 @@
     $('qr-img').hidden = true
     void startQr()
   })
+  // 关闭扫码框：用户主动关闭后不再自动弹回（状态栏与「重新扫码」按钮仍可再次打开）
+  $('qr-close').addEventListener('click', closeQr)
+  $('qr-later').addEventListener('click', closeQr)
+  // Esc 关闭，符合对话框习惯
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('login-overlay').hidden) closeQr()
+  })
   $('relogin').addEventListener('click', () => {
-    $('login-overlay').hidden = false
+    qrDismissed = false
+    qrAutoShown = true
     qrActive = false
-    void startQr()
+    openQr()
   })
   $('ws-save').addEventListener('click', saveWorkspace)
   $('theme-toggle').addEventListener('click', toggleTheme)
@@ -485,6 +526,6 @@
   setInterval(refresh, 3000)
   if (!qrTimerStarted) {
     qrTimerStarted = true
-    setInterval(pollQr, 2000)
+    setInterval(pollQrIfOpen, 2000)
   }
 })()
