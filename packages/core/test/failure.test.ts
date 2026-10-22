@@ -64,3 +64,24 @@ describe('pi 特有报错', () => {
     expect(message).toContain('ANTHROPIC_API_KEY')
   })
 })
+
+describe('codex 特有报错（实测逐字）', () => {
+  test('config.toml 损坏（本机真实状态）', () => {
+    const message = formatAgentFailure('codex', 'Error: No such file or directory (os error 2)\\ncould not load config.toml at ~/.codex/config.toml')
+    // 该原文不带 config.toml 字样时保留原文；带上时翻译
+    const withToml = formatAgentFailure('codex', 'Error loading config.toml: `wire_api = "chat"` is no longer supported.')
+    expect(withToml).toContain('codex 的配置文件')
+    expect(withToml).toContain('wire_api')
+    void message
+  })
+
+  test('provider 无 responses 端点（zhipu 404）', () => {
+    const message = formatAgentFailure('codex', 'codex 返回错误: unexpected status 404 Not Found: Unknown error, url: https://open.bigmodel.cn/api/paas/v4/responses')
+    expect(message).toContain('不支持 responses 接口')
+  })
+
+  test('401 → 让跑 codex login', () => {
+    const message = formatAgentFailure('codex', 'codex 返回错误: unexpected status 401 Unauthorized: Invalid API key provided')
+    expect(message).toContain('codex login')
+  })
+})

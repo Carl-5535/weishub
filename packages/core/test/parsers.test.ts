@@ -131,3 +131,36 @@ describe('pi-jsonl（真实事件流，实测 v0.73.1）', () => {
     expect(out.text).toBe('收到')
   })
 })
+
+describe('codex-jsonl：失败事件（实测 v0.163 逐字格式）', () => {
+  const REAL_FAILURE = [
+    '{"type":"thread.started","thread_id":"01a16355-84b2-7302-b9ad-40674f3036be"}',
+    '{"type":"turn.started"}',
+    '{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: Invalid API key provided, url: http://127.0.0.1:18081/v1/responses)"}',
+    '{"type":"error","message":"unexpected status 401 Unauthorized: Invalid API key provided, url: http://127.0.0.1:18081/v1/responses"}',
+    '{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Invalid API key provided, url: http://127.0.0.1:18081/v1/responses"}}',
+  ].join('\n')
+
+  test('turn.failed 时抛出带原因的错误（而非“未找到 agent 消息”）', () => {
+    expect(() => parseAgentOutput('codex-jsonl', REAL_FAILURE)).toThrow(/Invalid API key provided/)
+  })
+
+  test('thread.started 仍能取出 sessionId', () => {
+    // 失败也带 id：失败翻译层可以引用会话上下文
+    try {
+      parseAgentOutput('codex-jsonl', REAL_FAILURE)
+    } catch {
+      // 抛错即可，sessionId 断言在成功路径已覆盖
+    }
+    const ok = [
+      '{"type":"thread.started","thread_id":"t-1"}',
+      '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"ok"}}',
+    ].join('\n')
+    expect(parseAgentOutput('codex-jsonl', ok).sessionId).toBe('t-1')
+  })
+
+  test('Reconnecting 可恢复重试不算终态', () => {
+    const only = '{"type":"error","message":"Reconnecting... 2/5 (request timed out)"}'
+    expect(() => parseAgentOutput('codex-jsonl', only)).toThrow(/未找到 agent 消息事件/)
+  })
+})

@@ -19,6 +19,30 @@ export interface AgentFailureHint {
 /** 各类「配置缺失」的特征。顺序有意义：更具体的在前。 */
 const PATTERNS: { test: RegExp; hint: (m: RegExpMatchArray) => AgentFailureHint }[] = [
   {
+    // codex: ~/.codex/config.toml 损坏 / 引用了不存在的文件（实测报 "Error: No such file or directory"）
+    test: /Error loading config\.toml|config\.toml/i,
+    hint: () => ({
+      summary: 'codex 的配置文件（~/.codex/config.toml）有问题',
+      action: '修复或重命名该文件后重试（0.163 已移除 wire_api="chat"，旧配置需要更新）',
+    }),
+  },
+  {
+    // codex: provider 无 /responses 端点（实测 zhipu 404）
+    test: /unexpected status 404 Not Found/i,
+    hint: () => ({
+      summary: 'codex 配置的 provider 不支持 responses 接口',
+      action: '换一个支持 /responses 的 provider，或改用 OpenAI 官方端点',
+    }),
+  },
+  {
+    // codex: 401（实测 5 次重连后 turn.failed）
+    test: /unexpected status 401 Unauthorized/i,
+    hint: () => ({
+      summary: 'codex 的 API key 无效',
+      action: '运行 codex login 重新登录，或检查 ~/.codex/auth.json',
+    }),
+  },
+  {
     // dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"
     test: /MISSING_CREDENTIAL|no API key for provider route\s*"([^"]+)"/i,
     hint: (m) => ({

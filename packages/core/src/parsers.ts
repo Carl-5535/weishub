@@ -63,6 +63,7 @@ function parseClaudeJson(stdout: string): AgentOutput {
 function parseCodexJsonl(stdout: string): AgentOutput {
   let sessionId: string | undefined
   let text: string | undefined
+  let errorText: string | undefined
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
     if (trimmed === '') continue // 容忍尾部空行
@@ -92,10 +93,22 @@ function parseCodexJsonl(stdout: string): AgentOutput {
       const itemText = (rec.item as Record<string, unknown>).text
       if (typeof itemText === 'string') text = itemText
     }
+    // turn.failed / error 事件（实测 v0.163）：失败时没有 agent_message，
+    // 直接抛出带原因的错误交给失败翻译层
+    if (text === undefined && rec.type === 'turn.failed' && typeof rec.error === 'object' && rec.error !== null) {
+      const message = (rec.error as Record<string, unknown>).message
+      if (typeof message === 'string') errorText = message
+    }
+    if (text === undefined && rec.type === 'error' && typeof rec.message === 'string') {
+      // Reconnecting… N/5 是可恢复重试，终态 error 才记录
+      if (!/^Reconnecting/.test(rec.message)) errorText = rec.message
+    }
   }
   if (text === undefined) {
     throw new Error(
-      `解析 agent 输出失败（codex-jsonl）：未找到 agent 消息事件：${excerpt(stdout)}`,
+      errorText !== undefined
+        ? `codex 返回错误: ${errorText}`
+        : `解析 agent 输出失败（codex-jsonl）：未找到 agent 消息事件：${excerpt(stdout)}`,
     )
   }
   return { text, ...(sessionId !== undefined ? { sessionId } : {}) }

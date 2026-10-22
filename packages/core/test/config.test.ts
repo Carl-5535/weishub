@@ -44,7 +44,9 @@ test('内置配置包含 codex，关键字段与既定值一致', async () => {
   const codex = configs.find((c) => c.name === 'codex')
   expect(codex).toBeDefined()
   expect(codex!.detect).toBe('codex')
-  expect(codex!.run).toEqual(['codex', 'exec', '--json'])
+  expect(codex!.run).toEqual(['codex', 'exec', '--json', '--skip-git-repo-check'])
+  // auto 留空：resume 子命令不支持 -s，加了会让恢复会话直接报错
+  expect(codex!.permissionFlags.auto).toEqual([])
   expect(codex!.passVia).toBe('stdin')
   expect(codex!.outputFormat).toBe('codex-jsonl')
   expect(codex!.approval).toBe('app-server')

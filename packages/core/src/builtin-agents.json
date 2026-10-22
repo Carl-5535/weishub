@@ -37,7 +37,8 @@
     "run": [
       "codex",
       "exec",
-      "--json"
+      "--json",
+      "--skip-git-repo-check"
     ],
     "passVia": "stdin",
     "outputFormat": "codex-jsonl",
@@ -60,7 +61,8 @@
       ]
     },
     "workspace": null,
-    "timeoutSec": 1800
+    "timeoutSec": 1800,
+    "$note": "已按本机 codex 0.163.0 实测校准：exec --json 事件流（thread.started/item.completed），prompt 走 stdin（argv 会触发 Reading additional from stdin 前缀），--skip-git-repo-check 非必带。注意：resume 子命令不支持 -s/-C，故 auto 沙箱 flag 留空（用 codex 默认），full 用 bypass（resume 可用）"
   },
   {
     "$note": "已按本机 `dsh headless --help` 校准：任务走 stdin，--session-id <id> 恢复会话",
