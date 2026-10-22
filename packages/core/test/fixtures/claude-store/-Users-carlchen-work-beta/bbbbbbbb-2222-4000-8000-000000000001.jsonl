@@ -1,0 +1,3 @@
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-10-21T08:00:00.000Z","sessionId":"bbbbbbbb-2222-4000-8000-000000000001"}
+{"type":"queue-operation","operation":"dequeue","timestamp":"2026-10-21T08:00:00.100Z","sessionId":"bbbbbbbb-2222-4000-8000-000000000001"}
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"重构配置加载模块"}]},"uuid":"u-b1","timestamp":"2026-10-21T08:00:01.000Z","sessionId":"bbbbbbbb-2222-4000-8000-000000000001","version":"2.1.303"}

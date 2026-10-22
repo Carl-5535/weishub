@@ -1,0 +1,2 @@
+{"timestamp":"2026-10-20T12:00:00.000Z","type":"session_meta","payload":{"id":"cccccccc-3333-4000-8000-000000000001","timestamp":"2026-10-20T12:00:00.000Z","cwd":"/tmp/demo","originator":"codex-cli-vscode","cli_version":"0.21.0","instructions":"你是编码助手"}}
+{"timestamp":"2026-10-20T12:00:05.000Z","type":"event_msg","payload":{"type":"user_message","message":"帮助我把 README 翻译成中文","kind":"plain"}}
