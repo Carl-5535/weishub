@@ -70,11 +70,11 @@ test('内置配置包含 dsh 与 pi，且 $note 注释键被剥离', async () =>
   expect(dsh.resume).toEqual(['--session-id', '{{sessionId}}'])
   expect(dsh.resumeRun).toBeUndefined()
   const pi = configs.find((c) => c.name === 'pi')!
-  expect(pi.run).toEqual(['pi'])
-  expect(pi.outputFormat).toBe('text')
+  expect(pi.run).toEqual(['pi', '-p', '--mode', 'json'])
+  expect(pi.outputFormat).toBe('pi-jsonl')
   expect(pi.approval).toBeNull()
-  // pi v1 无已知的会话恢复入口：不带 resume/resumeRun
-  expect(pi.resume).toBeUndefined()
+  // pi 支持 --session <uuid>（flag 式追加恢复，实测接上上下文）
+  expect(pi.resume).toEqual(['--session', '{{sessionId}}'])
   expect(pi.resumeRun).toBeUndefined()
 })
 

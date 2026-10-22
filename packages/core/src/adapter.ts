@@ -20,6 +20,19 @@ export interface TaskResult {
   exitCode: number | null
 }
 
+/**
+ * 展开配置 env 里的 {VAR} 占位（从 hub 进程自身环境取值）。
+ * 指向不存在变量的占位展开为空串——用户显式写了它，就按用户的意图传。
+ */
+function expandEnv(env: Record<string, string> | undefined): Record<string, string> {
+  if (env === undefined) return {}
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(env)) {
+    out[key] = value.replace(/\{([A-Z_][A-Z0-9_]*)\}/g, (_, name: string) => process.env[name] ?? '')
+  }
+  return out
+}
+
 /** 无头执行一个 agent CLI：prompt 走 stdin，argv 模板做 {{sessionId}} 替换，超时/中止杀整个进程树。 */
 export async function runAgentTask(
   config: AgentConfig,
@@ -52,6 +65,8 @@ export async function runAgentTask(
     }
     const child = spawn(argv[0], argv.slice(1), {
       cwd: options.cwd,
+      // 配置声明的 env 叠加在 hub 进程环境之上（{VAR} 占位从 hub 环境展开）
+      env: { ...process.env, ...expandEnv(config.env) },
       stdio: ['pipe', 'pipe', 'pipe'],
       // posix 下让子进程成为独立进程组，便于整组击杀；win32 用 taskkill /T
       detached: process.platform !== 'win32',

@@ -27,6 +27,14 @@ const PATTERNS: { test: RegExp; hint: (m: RegExpMatchArray) => AgentFailureHint 
     }),
   },
   {
+    // pi: "No API key found for the selected model. Use /login to log into a provider via OAuth or API key."
+    test: /No API key found for the selected model/i,
+    hint: () => ({
+      summary: 'pi 没有配置任何 provider 的 API key',
+      action: '设置一个 key（如 ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENROUTER_API_KEY，见 pi --help 尾部）后重试',
+    }),
+  },
+  {
     // Claude Code 未登录
     test: /(not logged in|please run \/login|invalid api key|authentication_error|credit balance)/i,
     hint: () => ({

@@ -13,6 +13,9 @@ export interface AgentOutput {
  *   text 取自最后一条 agent_message 消息事件
  * - opencode-jsonl：逐行 JSON 事件（实测 v2.0.32），每个事件都有顶层 sessionID，
  *   最终文本取自最后一条 type === "text" 事件的 part.text
+ * - pi-jsonl：pi -p --mode json（实测 v0.73.1）。首行是 session header（.id 即会话 id），
+ *   最终文本取自最后一条 type === "agent_end" 事件里 role==="assistant" 的
+ *   content[] 中所有 type==="text" 的 .text 拼接（content 可能混有 thinking 块，要过滤）
  */
 export function parseAgentOutput(format: AgentConfig['outputFormat'], stdout: string): AgentOutput {
   switch (format) {
@@ -24,6 +27,8 @@ export function parseAgentOutput(format: AgentConfig['outputFormat'], stdout: st
       return parseCodexJsonl(stdout)
     case 'opencode-jsonl':
       return parseOpencodeJsonl(stdout)
+    case 'pi-jsonl':
+      return parsePiJsonl(stdout)
   }
 }
 
@@ -141,6 +146,60 @@ function parseOpencodeJsonl(stdout: string): AgentOutput {
         ? `opencode 返回错误: ${errorText}`
         : `解析 agent 输出失败（opencode-jsonl）：未找到 text 事件：${excerpt(stdout)}`,
     )
+  }
+  return { text, ...(sessionId !== undefined ? { sessionId } : {}) }
+}
+
+/**
+ * pi 的事件流（实测 v0.73.1，`pi -p --mode json`）：每行一个 JSON 对象。
+ * 首行是会话头 {"type":"session","id":"<uuid>",…}，其后是事件流，
+ * 最后一条 type==="agent_end" 的 messages[] 里 role==="assistant" 的
+ * content[] 中 type==="text" 的 .text 拼接即最终回复（content 里可能混有
+ * type==="thinking" 块，必须过滤）。stopReason!=="stop" 时带 errorMessage。
+ */
+function parsePiJsonl(stdout: string): AgentOutput {
+  let sessionId: string | undefined
+  let text: string | undefined
+  let errorText: string | undefined
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let event: unknown
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof event !== 'object' || event === null) continue
+    const rec = event as Record<string, unknown>
+    if (sessionId === undefined && rec.type === 'session' && typeof rec.id === 'string' && rec.id !== '') {
+      sessionId = rec.id
+    }
+    if (rec.type !== 'agent_end' || !Array.isArray(rec.messages)) continue
+    // 每个 agent_end 都带完整 messages 快照：取最后一条即为最终状态
+    let current: string | undefined
+    let currentError: string | undefined
+    for (const message of rec.messages as Record<string, unknown>[]) {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) continue
+      const parts: string[] = []
+      for (const block of message.content as Record<string, unknown>[]) {
+        if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+      }
+      if (parts.length > 0) current = parts.join('')
+      if (message.stopReason !== undefined && message.stopReason !== 'stop') {
+        const errorMessage = message.errorMessage
+        if (typeof errorMessage === 'string') currentError = errorMessage
+      }
+    }
+    if (current !== undefined) text = current
+    if (currentError !== undefined) errorText = currentError
+  }
+  // stopReason 非 stop（如 error）：即使有部分输出也算失败，交给失败翻译层
+  if (errorText !== undefined) {
+    throw new Error(`pi 返回错误: ${errorText}`)
+  }
+  if (text === undefined) {
+    throw new Error(`解析 agent 输出失败（pi-jsonl）：未找到 agent_end 事件：${excerpt(stdout)}`)
   }
   return { text, ...(sessionId !== undefined ? { sessionId } : {}) }
 }

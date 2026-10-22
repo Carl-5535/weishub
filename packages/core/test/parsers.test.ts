@@ -95,3 +95,39 @@ describe('opencode-jsonl（真实事件流，实测 v2.0.32）', () => {
     expect(out.text).toBe('收到')
   })
 })
+
+describe('pi-jsonl（真实事件流，实测 v0.73.1）', () => {
+  const REAL = [
+    '{"type":"session","version":3,"id":"01a1634d-6959-734b-a2bf-7e0e4f6388d6","timestamp":"2026-10-22T11:09:40.058Z","cwd":"/tmp/pi-cal"}',
+    '{"type":"agent_start"}',
+    '{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"只回复两个字：收到"}]}}',
+    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"…"}],"api":"anthropic-messages"}}',
+    '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"只回复两个字：收到"}],"timestamp":1792667380071},{"role":"assistant","content":[{"type":"thinking","thinking":"内部思考"},{"type":"text","text":"收到"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","stopReason":"stop","timestamp":1792667381000}]}',
+  ].join('\n')
+
+  test('提取 session id（首行 header）与最终文本（过滤 thinking 块）', () => {
+    const out = parseAgentOutput('pi-jsonl', REAL)
+    expect(out.sessionId).toBe('01a1634d-6959-734b-a2bf-7e0e4f6388d6')
+    expect(out.text).toBe('收到')
+  })
+
+  test('多条 agent_end 取最后一条（它带完整 messages 快照）', () => {
+    const later = '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"最新回复"}],"stopReason":"stop"}]}'
+    expect(parseAgentOutput('pi-jsonl', REAL + '\n' + later).text).toBe('最新回复')
+  })
+
+  test('stopReason 非 stop 时带 errorMessage 抛出', () => {
+    const raw = '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"x"}],"stopReason":"error","errorMessage":"provider quota exceeded"}]}'
+    expect(() => parseAgentOutput('pi-jsonl', raw)).toThrow(/provider quota exceeded/)
+  })
+
+  test('没有 agent_end 时抛中文错误', () => {
+    const raw = '{"type":"session","version":3,"id":"abc"}'
+    expect(() => parseAgentOutput('pi-jsonl', raw)).toThrow(/未找到 agent_end 事件/)
+  })
+
+  test('畸形行跳过不崩', () => {
+    const out = parseAgentOutput('pi-jsonl', 'broken\\n' + REAL)
+    expect(out.text).toBe('收到')
+  })
+})

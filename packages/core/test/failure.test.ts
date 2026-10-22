@@ -55,3 +55,12 @@ describe('formatAgentFailure', () => {
     expect(formatAgentFailure('a', raw).length).toBeLessThan(260)
   })
 })
+
+describe('pi 特有报错', () => {
+  test('No API key found：翻译并给出可选 key 清单', () => {
+    const raw = 'No API key found for the selected model.\\n\\nUse /login to log into a provider via OAuth or API key. See:\\n  /opt/homebrew/lib/node_modules/docs/providers.md'
+    const message = formatAgentFailure('pi', raw)
+    expect(message).toContain('pi 没有配置任何 provider 的 API key')
+    expect(message).toContain('ANTHROPIC_API_KEY')
+  })
+})

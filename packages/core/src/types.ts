@@ -14,12 +14,14 @@ export interface AgentConfig {
   detect: string // PATH 中探测的命令名
   run: string[] // argv 模板，{{sessionId}} 占位
   passVia: 'stdin'
-  outputFormat: 'text' | 'claude-json' | 'codex-jsonl' | 'opencode-jsonl'
+  outputFormat: 'text' | 'claude-json' | 'codex-jsonl' | 'opencode-jsonl' | 'pi-jsonl'
   listSessions?: { store: string; kind: 'claude' | 'codex' } // store 支持 ~ 展开
   resume?: string[] // 追加到 run 末尾，含 {{sessionId}}
   resumeRun?: string[] // 整条替换 run，含 {{sessionId}}
   approval: 'permission-prompt-tool' | 'app-server' | null
   permissionFlags: { auto: string[]; full: string[] }
   workspace?: string | null // null/缺失 = 全局工作目录
+  /** 传给子进程的额外环境变量；值支持 {ENV_VAR} 占位（从 hub 进程环境展开），缺失占位展开为空串 */
+  env?: Record<string, string>
   timeoutSec: number
 }
