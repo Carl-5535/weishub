@@ -11,6 +11,8 @@ export interface AgentOutput {
  * - claude-json：单个 JSON 对象，取 result / session_id
  * - codex-jsonl：逐行 JSON 事件流，session id 取自首个含 session_id/thread_id 的事件，
  *   text 取自最后一条 agent_message 消息事件
+ * - opencode-jsonl：逐行 JSON 事件（实测 v2.0.32），每个事件都有顶层 sessionID，
+ *   最终文本取自最后一条 type === "text" 事件的 part.text
  */
 export function parseAgentOutput(format: AgentConfig['outputFormat'], stdout: string): AgentOutput {
   switch (format) {
@@ -20,6 +22,8 @@ export function parseAgentOutput(format: AgentConfig['outputFormat'], stdout: st
       return parseClaudeJson(stdout)
     case 'codex-jsonl':
       return parseCodexJsonl(stdout)
+    case 'opencode-jsonl':
+      return parseOpencodeJsonl(stdout)
   }
 }
 
@@ -87,6 +91,55 @@ function parseCodexJsonl(stdout: string): AgentOutput {
   if (text === undefined) {
     throw new Error(
       `解析 agent 输出失败（codex-jsonl）：未找到 agent 消息事件：${excerpt(stdout)}`,
+    )
+  }
+  return { text, ...(sessionId !== undefined ? { sessionId } : {}) }
+}
+
+/**
+ * opencode 的事件流（实测 v2.0.32）：每行一个 JSON 事件，形如
+ *   {"type":"step_start","sessionID":"ses_…","part":{…}}
+ *   {"type":"text","sessionID":"ses_…","part":{"type":"text","text":"收到",…}}
+ * 最终文本 = 最后一条 type==="text" 事件的 part.text；sessionId 取自任意事件的顶层 sessionID。
+ * error 事件（provider 未配置等）直接抛出，让失败翻译层给出人话提示。
+ */
+function parseOpencodeJsonl(stdout: string): AgentOutput {
+  let sessionId: string | undefined
+  let text: string | undefined
+  let errorText: string | undefined
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '') continue
+    let event: unknown
+    try {
+      event = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof event !== 'object' || event === null) continue
+    const rec = event as Record<string, unknown>
+    const sid = rec.sessionID
+    if (sessionId === undefined && typeof sid === 'string' && sid !== '') sessionId = sid
+    if (rec.type === 'text') {
+      const part = rec.part
+      if (typeof part === 'object' && part !== null) {
+        const partText = (part as Record<string, unknown>).text
+        if (typeof partText === 'string') text = partText
+      }
+    }
+    if (rec.type === 'error' && text === undefined) {
+      const err = rec.error
+      if (typeof err === 'object' && err !== null) {
+        const message = (err as Record<string, unknown>).message
+        if (typeof message === 'string') errorText = message
+      }
+    }
+  }
+  if (text === undefined) {
+    throw new Error(
+      errorText !== undefined
+        ? `opencode 返回错误: ${errorText}`
+        : `解析 agent 输出失败（opencode-jsonl）：未找到 text 事件：${excerpt(stdout)}`,
     )
   }
   return { text, ...(sessionId !== undefined ? { sessionId } : {}) }

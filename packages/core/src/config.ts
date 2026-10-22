@@ -11,7 +11,7 @@ import { dataDir } from '@weishub/channel-wechat'
 import builtinJson from './builtin-agents.json' with { type: 'json' }
 import type { AgentConfig } from './types.js'
 
-const OUTPUT_FORMATS = ['text', 'claude-json', 'codex-jsonl'] as const
+const OUTPUT_FORMATS = ['text', 'claude-json', 'codex-jsonl', 'opencode-jsonl'] as const
 const APPROVAL_MODES = ['permission-prompt-tool', 'app-server'] as const
 
 /** 剥离 JSON 中以 $ 开头的注释键（如 $note）。 */

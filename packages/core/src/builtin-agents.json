@@ -45,6 +45,19 @@
     "timeoutSec": 1800
   },
   {
+    "$note": "已按本机 opencode v2.0.32 实测校准：run --format json 事件流，--session <id> 恢复会话。模型默认用内置免费档（opencode/glm-5.3-flash-free），用户可在 agents.d 覆盖 -m 参数",
+    "name": "opencode",
+    "detect": "opencode",
+    "run": ["opencode", "run", "--format", "json", "-m", "opencode/glm-5.3-flash-free"],
+    "passVia": "stdin",
+    "outputFormat": "opencode-jsonl",
+    "resumeRun": ["opencode", "run", "--format", "json", "-m", "opencode/glm-5.3-flash-free", "--session", "{{sessionId}}"],
+    "approval": null,
+    "permissionFlags": { "auto": ["--auto"], "full": ["--auto"] },
+    "workspace": null,
+    "timeoutSec": 1800
+  },
+  {
     "$note": "执行时以实际 CLI 输出校准；该 agent v1 不支持会话恢复",
     "name": "pi",
     "detect": "pi",

@@ -14,7 +14,7 @@ export interface AgentConfig {
   detect: string // PATH 中探测的命令名
   run: string[] // argv 模板，{{sessionId}} 占位
   passVia: 'stdin'
-  outputFormat: 'text' | 'claude-json' | 'codex-jsonl'
+  outputFormat: 'text' | 'claude-json' | 'codex-jsonl' | 'opencode-jsonl'
   listSessions?: { store: string; kind: 'claude' | 'codex' } // store 支持 ~ 展开
   resume?: string[] // 追加到 run 末尾，含 {{sessionId}}
   resumeRun?: string[] // 整条替换 run，含 {{sessionId}}

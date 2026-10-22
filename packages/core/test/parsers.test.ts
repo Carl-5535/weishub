@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { expect, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { parseAgentOutput } from '../src/parsers.js'
 
 const fixturesDir = join(import.meta.dirname, 'fixtures')
@@ -61,4 +61,37 @@ test('text：原样返回、无 sessionId；空 stdout 抛中文错误', () => {
   expect(parseAgentOutput('text', '你好\n')).toEqual({ text: '你好\n' })
   expect(() => parseAgentOutput('text', '')).toThrow(/空|无输出|解析/)
   expect(() => parseAgentOutput('text', '  \n')).toThrow(/空|无输出|解析/)
+})
+
+describe('opencode-jsonl（真实事件流，实测 v2.0.32）', () => {
+  const REAL_EVENTS = [
+    '{"type":"step_start","timestamp":1792666499922,"sessionID":"ses_e9cc05489ffevnq2F1cPe7RIeW","part":{"id":"prt_1","sessionID":"ses_e9cc05489ffevnq2F1cPe7RIeW","messageID":"msg_1","type":"step-start"}}',
+    '{"type":"text","timestamp":1792666500150,"sessionID":"ses_e9cc05489ffevnq2F1cPe7RIeW","part":{"id":"prt_2","sessionID":"ses_e9cc05489ffevnq2F1cPe7RIeW","messageID":"msg_1","type":"text","text":"收到","time":{"start":1792666479494,"end":1792666500150}}}',
+  ].join('\n')
+
+  test('提取最终文本与 sessionID（真实事件样例）', () => {
+    const out = parseAgentOutput('opencode-jsonl', REAL_EVENTS)
+    expect(out.text).toBe('收到')
+    expect(out.sessionId).toBe('ses_e9cc05489ffevnq2F1cPe7RIeW')
+  })
+
+  test('多条 text 事件取最后一条', () => {
+    const events = REAL_EVENTS + '\n' + '{"type":"text","sessionID":"ses_x","part":{"type":"text","text":"第二段"}}'
+    expect(parseAgentOutput('opencode-jsonl', events).text).toBe('第二段')
+  })
+
+  test('error 事件（provider 未配置等）抛出带原因的错误', () => {
+    const raw = '{"type":"error","sessionID":"ses_e","error":{"type":"provider.invalid-request","message":"Model is unavailable.","status":400}}'
+    expect(() => parseAgentOutput('opencode-jsonl', raw)).toThrow(/Model is unavailable/)
+  })
+
+  test('没有 text 事件时抛中文错误', () => {
+    const raw = '{"type":"step_start","sessionID":"ses_x","part":{}}'
+    expect(() => parseAgentOutput('opencode-jsonl', raw)).toThrow(/未找到 text 事件/)
+  })
+
+  test('畸形行跳过不崩', () => {
+    const out = parseAgentOutput('opencode-jsonl', 'not-json\n' + REAL_EVENTS + '\n\n')
+    expect(out.text).toBe('收到')
+  })
 })

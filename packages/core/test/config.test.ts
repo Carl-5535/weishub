@@ -111,7 +111,7 @@ test('extraDir 同名条目逐字段覆盖，异名追加，顺序内置在前',
 
 test('extraDir 缺失时静默跳过', async () => {
   const configs = await loadAgentConfigs(join(extraDir, 'no-such-dir'))
-  expect(configs.map((c) => c.name)).toEqual(['claude', 'codex', 'dsh', 'pi'])
+  expect(configs.map((c) => c.name)).toEqual(['claude', 'codex', 'dsh', 'opencode', 'pi'])
 })
 
 test('覆盖文件缺 name 抛中文错误', async () => {
