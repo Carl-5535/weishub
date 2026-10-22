@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { defaultCredentialPath, ILinkClient, readCredential } from '@weishub/channel-wechat'
 import { discoverAgents, loadAgentConfigs } from '@weishub/core'
-import { Hub, type HubDeps } from './inbound.js'
+import { Hub, loadPersistedProtocol, type HubDeps } from './inbound.js'
 
 export interface ServeOptions {
   /** 全局工作目录，默认 ~/weishub-workspace */
@@ -38,10 +38,16 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
   }
   const allAgents = await loadAgentConfigs(options.agentsDir)
   const agents = await discoverAgents(allAgents)
+  // 断点续轮询：先读持久化的协议状态（轮询游标 + context token）喂给 client 构造器，
+  // client 侧状态变化回写 Hub 的持久化链（hub 先声明再赋值，绕开构造顺序环）
+  const persistedProtocol = await loadPersistedProtocol()
+  let hubRef: Hub | undefined
   const client = new ILinkClient({
     token: credential.token,
     accountId: credential.accountId,
     apiBase: credential.apiBase,
+    state: persistedProtocol,
+    onStateChange: (state) => hubRef?.recordProtocolState(state),
   })
   const hub = buildHub({
     client,
@@ -54,6 +60,7 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
     webPort: options.webPort,
     legacyCredentialDir: options.legacyCredentialDir,
   })
+  hubRef = hub
   await hub.start()
   return hub
 }

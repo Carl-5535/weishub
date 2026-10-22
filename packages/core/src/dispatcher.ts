@@ -7,6 +7,8 @@ export interface DispatcherDeps {
   /** agent 覆盖目录 ?? 全局工作目录，由外层注入 */
   cwdFor(agentName: string): string
   onReply(chatId: string, text: string): Promise<void>
+  /** 任务终态钩子（成功/失败/中止都触发，队列续跑前调用）：外层据此清理该 chat 的遗留状态 */
+  onTaskEnd?(chatId: string): void
   /** 每 chat 排队上限，默认 5 */
   maxQueue?: number
 }
@@ -116,6 +118,20 @@ export class ChatDispatcher {
     return true
   }
 
+  /**
+   * 关机语义（Hub.stop 调用，与 /stop 不同）：中止所有 chat 的在跑任务
+   * （经各自 AbortController），队列中的任务直接丢弃、不再执行——关机不执行新任务。
+   * 不发送「已中止」回复（进程即将退出，回复无意义）。
+   */
+  stopAll(): void {
+    for (const state of this.chats.values()) {
+      state.queue.length = 0
+      if (state.running && state.abort !== undefined && !state.abort.signal.aborted) {
+        state.abort.abort()
+      }
+    }
+  }
+
   snapshot(): { chats: Record<string, ChatBinding>; modes: Record<string, PermissionMode> } {
     const chats: Record<string, ChatBinding> = {}
     for (const [chatId, state] of this.chats) chats[chatId] = { ...state.binding }
@@ -183,6 +199,12 @@ export class ChatDispatcher {
   private finishAndDrain(chatId: string, state: ChatState): void {
     state.running = false
     state.abort = undefined
+    // 任务终态（完成/失败/中止）钩子：外层清理该 chat 的挂起审批等遗留状态；失败不阻塞队列
+    try {
+      this.deps.onTaskEnd?.(chatId)
+    } catch {
+      // 清理钩子失败也不能影响队列推进
+    }
     const next = state.queue.shift()
     if (next !== undefined) this.runTask(chatId, state, next)
   }

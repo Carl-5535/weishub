@@ -27,9 +27,12 @@
   body.dark li.chat-item { border-color: #333; }
   li.chat-item:hover, li.chat-item.sel { background: #eef4ff; }
   body.dark li.chat-item:hover, body.dark li.chat-item.sel { background: #2a3140; }
-  #msg-list li { padding: 4px 0; font-size: 13px; word-break: break-all; }
-  #msg-list li.out { color: #555; }
-  body.dark #msg-list li.out { color: #aaa; }
+  #msg-list li { padding: 4px 0 4px 8px; font-size: 13px; word-break: break-all; border-left: 3px solid transparent; }
+  /* 消息流：收（in，owner 发出）与发（out，hub 回复）样式区分 */
+  #msg-list li.in { border-left-color: #2c6e49; }
+  #msg-list li.out { border-left-color: #b7bfc9; color: #555; }
+  body.dark #msg-list li.in { border-left-color: #4f9e6e; }
+  body.dark #msg-list li.out { border-left-color: #3a3f47; color: #aaa; }
   #send-form { display: flex; gap: 8px; margin-top: 8px; }
   input[type=text] { flex: 1; padding: 7px 9px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
   body.dark input[type=text] { background: #1b1c1e; color: inherit; border-color: #444; }

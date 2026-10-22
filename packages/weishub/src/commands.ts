@@ -235,12 +235,17 @@ async function replyStatus(ctx: CommandContext): Promise<void> {
 // ---- /stop ----
 
 async function replyStop(ctx: CommandContext): Promise<void> {
-  if (!ctx.dispatcher.busy(ctx.chatId)) {
-    await ctx.reply('当前没有运行中的任务')
+  // 回复必须与实际效果一致：真的中止了 / 只有队列 / 什么都没有，三选一
+  if (ctx.dispatcher.stop(ctx.chatId)) {
+    await ctx.reply('已中止当前任务（队列中的任务会继续）')
     return
   }
-  ctx.dispatcher.stop(ctx.chatId)
-  await ctx.reply('已中止当前任务（队列中的任务会继续）')
+  const { queued } = ctx.dispatcher.queueInfo(ctx.chatId)
+  if (queued > 0) {
+    await ctx.reply(`没有正在运行的任务，队列中的 ${queued} 条任务将继续`)
+    return
+  }
+  await ctx.reply('当前没有运行中的任务')
 }
 
 // ---- /permission ----

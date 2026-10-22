@@ -2,10 +2,10 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import type { InboundMessage } from '@weishub/channel-wechat'
+import type { InboundMessage, ILinkState } from '@weishub/channel-wechat'
 import { defaultCredentialPath, readCredential } from '@weishub/channel-wechat'
 import type { AgentConfig, RunOptions, TaskResult } from '@weishub/core'
-import { Hub, type HubDeps } from '../src/inbound.js'
+import { Hub, loadPersistedProtocol, type HubDeps } from '../src/inbound.js'
 
 let seq = 0
 let homeDir: string
@@ -224,16 +224,172 @@ test('有挂起审批时：其余文本照常入队，回复附有待审批提�
   expect(kit.sent.map((s) => s.text).join('\n')).toContain('待审批')
 })
 
-test('「网页」回复不消费审批，提示 Web 面板未接入', async () => {
+test('「网页」回复不消费审批，提示可去 Web 面板处理', async () => {
   const { hub, sent, calls } = makeHub()
   const { done } = hub.approvals.startRequest('owner-1', 'Bash', '{}')
   await hub.handleInbound(msg({ text: '网页' }))
   await drain(hub)
-  expect(sent.map((s) => s.text).join('\n')).toContain('Task 19')
+  expect(sent.map((s) => s.text).join('\n')).toContain('Web 面板')
   expect(calls).toHaveLength(0)
   // 审批仍然挂起：同意仍可决议
   await hub.handleInbound(msg({ text: '同意' }))
   expect(await done).toBe('allow')
+})
+
+test('无挂起审批时收到同意/拒绝词：回复没有待处理审批，不当作提示词下发', async () => {
+  const { hub, sent, calls } = makeHub()
+  await hub.handleInbound(msg({ text: '同意' }))
+  await drain(hub)
+  expect(sent.map((s) => s.text).join('\n')).toContain('当前没有待处理的审批')
+  expect(calls).toHaveLength(0)
+})
+
+test('任务终态撤销该 chat 的挂起审批：/stop 后 pending 清空，后续「同意」不再决议任何请求', async () => {
+  const kit = makeHub(undefined, (_prompt, options) => {
+    // 模拟真 runAgentTask：abort 即 reject
+    return new Promise<TaskResult>((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new Error('中止')), { once: true })
+    })
+  })
+  // 先提交一个会挂起的任务（占用 dispatcher），再挂一条审批
+  await kit.hub.handleInbound(msg({ text: '跑长任务' }))
+  await vi.waitFor(() => expect(kit.calls).toHaveLength(1))
+  const { done } = kit.hub.approvals.startRequest('owner-1', 'Bash', '{"command":"ls"}')
+  expect(kit.hub.approvals.pending()).toHaveLength(1)
+  // /stop 中止任务 → 任务终态 → 挂起审批被撤销（deny）
+  await kit.hub.handleInbound(msg({ text: '/stop' }))
+  expect(await done).toBe('deny')
+  await vi.waitFor(() => expect(kit.hub.approvals.pending()).toHaveLength(0))
+  await drain(kit.hub)
+  // 撤销后的「同意」不决议任何请求：明确回复没有待处理审批，也不进任务队列
+  await kit.hub.handleInbound(msg({ text: '同意' }))
+  await drain(kit.hub)
+  expect(kit.calls).toHaveLength(1) // 没有新任务
+  expect(kit.sent.map((s) => s.text).join('\n')).toContain('当前没有待处理的审批')
+})
+
+test('任务成功终态同样清理该 chat 的待审批提醒', async () => {
+  const kit = makeHub()
+  kit.hub.approvals.startRequest('owner-1', 'Bash', '{}') // 挂起审批触发提醒登记
+  await kit.hub.handleInbound(msg({ text: '继续干活' }))
+  await settle(kit)
+  // 提醒出现在这条回复里（消息收到时审批还挂着）
+  expect(kit.sent.map((s) => s.text).join('\n')).toContain('待审批')
+  // 任务终态：挂起审批被撤销，下一条回复不再带提醒
+  await kit.hub.handleInbound(msg({ text: '再干一件' }))
+  await settle(kit, 2)
+  // onTaskEnd 在 reply promise 链的 .finally 里触发，比回复入队更晚一拍
+  await vi.waitFor(() => expect(kit.hub.approvals.pending()).toHaveLength(0))
+  expect(kit.sent.at(-1)).not.toContain('待审批')
+})
+
+test('hub.stop() 中止所有 chat 的在跑任务（关机不留孤儿进程）', async () => {
+  const aborted: string[] = []
+  const kit = makeHub(undefined, (_prompt, options) => {
+    return new Promise<TaskResult>((_, reject) => {
+      options.signal?.addEventListener('abort', () => {
+        aborted.push(options.chatId ?? '')
+        reject(new Error('中止'))
+      }, { once: true })
+    })
+  })
+  await kit.hub.handleInbound(msg({ id: 's-a', chatId: 'chat-a', userId: 'owner-1', text: '任务A' }))
+  await kit.hub.handleInbound(msg({ id: 's-b', chatId: 'chat-b', userId: 'owner-1', text: '任务B' }))
+  await vi.waitFor(() => expect(kit.calls).toHaveLength(2))
+  await kit.hub.stop()
+  expect(aborted.sort()).toEqual(['chat-a', 'chat-b'])
+})
+
+// ---- F-I1：轮询游标 / context token 持久化 ----
+
+test('协议状态持久化：client 状态变化落盘，重建后新 client 拿到持久化 ILinkState', async () => {
+  let stateSink: ((state: ILinkState) => Promise<void> | void) | undefined
+  // 模拟真实 ILinkClient：构造时收 state，poll 推进游标并经 onStateChange 回报
+  function statefulClient(initial?: ILinkState) {
+    let updatesBuffer = initial?.updatesBuffer ?? ''
+    const contextTokens = new Map(Object.entries(initial?.contextTokens ?? {}))
+    return {
+      initial,
+      poll: vi.fn(async (): Promise<InboundMessage[]> => {
+        updatesBuffer = 'buf-advanced'
+        contextTokens.set('chat-a', 'ctx-token-1')
+        await stateSink?.({ updatesBuffer, contextTokens: Object.fromEntries(contextTokens) })
+        return []
+      }),
+      sendText: vi.fn(async () => {}),
+      sendMedia: vi.fn(async () => {}),
+      sendTyping: vi.fn(async () => {}),
+    }
+  }
+  const client1 = statefulClient()
+  const hub1 = new Hub({
+    client: client1 as unknown as HubDeps['client'],
+    accountId: 'bot-1',
+    ownerUserId: 'owner-1',
+    agents: [agentClaude],
+    workspace,
+  })
+  hubs.push(hub1)
+  // 与 serve.ts 相同的装配：client onStateChange → hub.recordProtocolState
+  stateSink = (state) => hub1.recordProtocolState(state)
+  await hub1.start()
+  await hub1.tick() // poll 推进游标 → onStateChange → 落盘
+  await hub1.stop()
+  // 状态文件里有协议状态；loadPersistedProtocol（serve 构造 client 前的同一接缝）读出
+  const persisted = await loadPersistedProtocol()
+  expect(persisted).toEqual({ updatesBuffer: 'buf-advanced', contextTokens: { 'chat-a': 'ctx-token-1' } })
+  // 重建：新 client（与 serve 一样以持久化状态构造）收到断点
+  const client2 = statefulClient(persisted)
+  expect(client2.initial).toEqual(persisted)
+  const hub2 = new Hub({
+    client: client2 as unknown as HubDeps['client'],
+    accountId: 'bot-1',
+    ownerUserId: 'owner-1',
+    agents: [agentClaude],
+    workspace,
+  })
+  hubs.push(hub2)
+  stateSink = (state) => hub2.recordProtocolState(state)
+  await hub2.start()
+  await hub2.tick()
+  // 游标在新 client 的基础上继续推进，而不是从头开始
+  const after = await loadPersistedProtocol()
+  expect(after).toEqual({ updatesBuffer: 'buf-advanced', contextTokens: { 'chat-a': 'ctx-token-1' } })
+  await hub2.stop()
+})
+
+// ---- F-I4：消息环（Web 面板消息流） ----
+
+test('消息环：入站与回复均按序记录（in/out 方向区分）', async () => {
+  const kit = makeHub(undefined, async () => ({ text: '回答内容', exitCode: 0 }))
+  await kit.hub.handleInbound(msg({ text: '帮我查一下' }))
+  await settle(kit)
+  const messages = kit.hub.chatMessages('owner-1')
+  // 首条消息自动绑定会产生一条欢迎语（out），随后是入站与任务回复
+  expect(messages).toEqual([
+    { direction: 'in', text: '帮我查一下', at: expect.any(Number) },
+    { direction: 'out', text: expect.stringContaining('已绑定'), at: expect.any(Number) },
+    { direction: 'out', text: '回答内容', at: expect.any(Number) },
+  ])
+})
+
+test('消息环封顶 50 条：超出后丢弃最旧', async () => {
+  const kit = makeHub()
+  for (let i = 0; i < 60; i++) {
+    await kit.hub.handleInbound(msg({ text: `/help ${i}` })) // 命令消息也入环且回复即时
+  }
+  await drain(kit.hub)
+  const messages = kit.hub.chatMessages('owner-1')
+  expect(messages).toHaveLength(50)
+  // 最旧的已淘汰：末尾是第 60 次（/help 59）的收与复
+  expect(messages.at(-2)).toMatchObject({ direction: 'in', text: '/help 59' })
+  expect(messages.at(-1)).toMatchObject({ direction: 'out' })
+  expect(messages[0]!.text).not.toContain('/help 0')
+})
+
+test('chatMessages 对未知 chat 返回空数组', () => {
+  const { hub } = makeHub()
+  expect(hub.chatMessages('no-such-chat')).toEqual([])
 })
 
 test('入站媒体落盘 workspace 并在 prompt 末尾追加 [附件] 行；mediaErrors 附提示', async () => {

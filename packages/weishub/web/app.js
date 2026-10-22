@@ -9,7 +9,7 @@
   let selected = null         // 当前选中的 chatId
   let qrActive = false        // 扫码流程进行中（避免重复 start）
   let qrTimerStarted = false
-  const localMsgs = new Map() // chatId -> [{dir:'out'|'reply', text}]（仅本页面会话期内的消息）
+  let msgFetchSeq = 0         // 消息流请求序号：慢响应不覆盖新选中的 chat
 
   function apiUrl(path) {
     return path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token)
@@ -129,18 +129,31 @@
     $('chat-title').appendChild(document.createTextNode(chat.chatId))
     $('chat-title').appendChild(textEl('span', 'badge', chat.agentName))
     if (chat.sessionId) $('chat-title').appendChild(textEl('span', 'badge mode', '会话恢复'))
+    loadMessages(chat.chatId)
+  }
+
+  // 消息流：hub 每 chat 的收发环（最近 50 条），received（in）与 sent（out）样式区分
+  async function loadMessages(chatId) {
+    const mySeq = ++msgFetchSeq
+    let r
+    try {
+      r = await api(`/api/chats/${encodeURIComponent(chatId)}/messages`)
+    } catch {
+      return
+    }
+    if (mySeq !== msgFetchSeq || chatId !== selected) return // 已切到别的聊天
     const list = $('msg-list')
     list.textContent = ''
-    const msgs = localMsgs.get(chat.chatId) ?? []
-    if (msgs.length === 0) {
-      list.appendChild(textEl('li', 'muted', '（本页消息仅展示此页面发出的插话；历史消息见微信聊天）'))
+    if (r.messages.length === 0) {
+      list.appendChild(textEl('li', 'muted', '（暂无消息记录：收发的最近 50 条会显示在这里）'))
     }
-    for (const m of msgs) {
-      list.appendChild(textEl('li', m.dir, (m.dir === 'out' ? '我：' : '回复：') + m.text))
+    for (const m of r.messages) {
+      const prefix = m.direction === 'in' ? '我：' : '枢：'
+      list.appendChild(textEl('li', m.direction, prefix + m.text))
     }
-    const outbox = state.outbox[chat.chatId]
+    const outbox = state.outbox[chatId]
     if (outbox && outbox.next < outbox.chunks.length) {
-      list.appendChild(textEl('li', 'reply', '（待投递）' + outbox.chunks[outbox.next]))
+      list.appendChild(textEl('li', 'out', '（待投递）' + outbox.chunks[outbox.next]))
     }
   }
 
@@ -230,12 +243,10 @@
     const text = input.value.trim()
     if (text === '' || !selected) return
     input.value = ''
-    const msgs = localMsgs.get(selected) ?? []
-    msgs.push({ dir: 'out', text })
-    localMsgs.set(selected, msgs)
-    renderDetail()
     try {
       await post(`/api/chats/${encodeURIComponent(selected)}/send`, { text })
+      // 插话经 hub 入站管线入消息环，重拉消息流即可见
+      await loadMessages(selected)
     } catch (err) {
       alert('发送失败：' + err.message)
     }

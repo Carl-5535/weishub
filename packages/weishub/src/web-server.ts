@@ -178,6 +178,12 @@ export async function startWebServer(
       return send(res, 200, { ok: true })
     }
 
+    const messagesMatch = req.method === 'GET' ? /^\/api\/chats\/([^/]+)\/messages$/.exec(path) : null
+    if (messagesMatch) {
+      const chatId = decodeURIComponent(messagesMatch[1]!)
+      return send(res, 200, { messages: hub.chatMessages(chatId) })
+    }
+
     const approvalMatch = req.method === 'POST' ? /^\/api\/approvals\/([^/]+)$/.exec(path) : null
     if (approvalMatch) {
       const body = await readJson(req, cap)

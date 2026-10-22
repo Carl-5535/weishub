@@ -77,6 +77,7 @@ function makeDeps(
   overrides: Partial<{
     cwdFor: (agentName: string) => string
     onReply: (chatId: string, text: string) => Promise<void>
+    onTaskEnd: (chatId: string) => void
     maxQueue: number
   }> = {},
 ) {
@@ -92,6 +93,7 @@ function makeDeps(
           replies.push({ chatId, text })
           return Promise.resolve()
         }),
+      onTaskEnd: overrides.onTaskEnd,
       maxQueue: overrides.maxQueue,
     },
     replies,
@@ -510,6 +512,80 @@ test('同一聊天连续两次 stop 只中止一次，只回复一条「已中�
   await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
   expect(calls).toHaveLength(1)
   expect(replies.filter((r) => r.text === '已中止')).toHaveLength(1)
+})
+
+test('stopAll：所有 chat 在跑任务的 signal 被中止，队列被丢弃不再执行', async () => {
+  const aborted: boolean[] = []
+  const run = vi.fn((config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
+    void config
+    return new Promise<TaskResult>((_, reject) => {
+      options.signal?.addEventListener('abort', () => {
+        aborted.push(true)
+        reject(new Error('中止'))
+      }, { once: true })
+    })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('a', 'claude')
+  d.bind('b', 'claude')
+  expect(d.submit('a', 'a1')).toBe('accepted')
+  expect(d.submit('a', 'a2')).toBe('queued')
+  expect(d.submit('b', 'b1')).toBe('accepted')
+  await drain()
+  d.stopAll()
+  expect(aborted).toHaveLength(2) // 两个在跑任务的 signal 都被中止
+  // 放行微任务：被中止的任务 reject 后队列里没有新任务被启动
+  await drain()
+  await drain()
+  expect(d.busy('a')).toBe(false) // 队列已清空
+  expect(d.busy('b')).toBe(false)
+  expect(run).toHaveBeenCalledTimes(2) // 只有两个在跑任务，队列任务未执行
+  expect(replies).toHaveLength(0) // 关机不发「已中止」回复
+})
+
+test('stopAll 对空闲 dispatcher 是安全 no-op', () => {
+  const fake = instantRun()
+  const { deps } = makeDeps(fake.run)
+  const d = new ChatDispatcher(deps)
+  expect(() => d.stopAll()).not.toThrow()
+})
+
+test('onTaskEnd 在任务终态（成功/失败/中止）时收到 chatId，先于队列续跑', async () => {
+  const ends: string[] = []
+  let fail = true
+  const { run } = makeFakeRun(() =>
+    fail
+      ? Promise.reject(new Error('炸了'))
+      : Promise.resolve({ text: '好', exitCode: 0 }),
+  )
+  const { deps } = makeDeps(run, { onTaskEnd: (chatId) => ends.push(chatId) })
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  // 失败终态
+  d.submit('c1', '一')
+  await vi.waitFor(() => expect(ends).toEqual(['c1']))
+  // 成功终态 ×2（第二个来自队列续跑），每次终态都回调
+  fail = false
+  d.submit('c1', '二')
+  d.submit('c1', '三')
+  await vi.waitFor(() => expect(ends).toEqual(['c1', 'c1', 'c1']))
+  expect(d.busy('c1')).toBe(false)
+})
+
+test('onTaskEnd 抛出不影响队列推进', async () => {
+  const { run } = makeFakeRun(() => Promise.resolve({ text: '好', exitCode: 0 }))
+  const { deps, replies } = makeDeps(run, {
+    onTaskEnd: () => {
+      throw new Error('清理炸了')
+    },
+  })
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.submit('c1', '一')
+  d.submit('c1', '二')
+  await vi.waitFor(() => expect(replies.map((r) => r.text)).toEqual(['好', '好']))
+  expect(d.busy('c1')).toBe(false)
 })
 
 test('queueInfo 汇报运行中与排队数（/status 展示用）', async () => {

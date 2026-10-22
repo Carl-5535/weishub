@@ -29,6 +29,7 @@ import {
   writePrivateJson,
   type HubLock,
   type ILinkClient,
+  type ILinkState,
   type InboundMessage,
   Outbox,
   type OutboxItem,
@@ -82,6 +83,17 @@ const DENY_WORDS = new Set(['拒绝', 'no'])
 
 type ApprovalReply = 'allow' | 'deny' | 'web' | 'other'
 
+/** 消息流单条记录（Web 面板 §9「消息流：查看收发」）。 */
+export interface ChatMessageEntry {
+  /** in = 收到的消息（微信/面板插话），out = hub 发出的回复 */
+  direction: 'in' | 'out'
+  text: string
+  at: number
+}
+
+const MESSAGE_RING_CAP = 50
+const MESSAGE_EXCERPT_CHARS = 500
+
 function classifyApprovalReply(text: string): ApprovalReply {
   const normalized = text.trim().toLowerCase()
   if (ALLOW_WORDS.has(normalized)) return 'allow'
@@ -95,6 +107,34 @@ function approvalMcpScriptPath(): string {
   return fileURLToPath(new URL('./approval-mcp.js', import.meta.url))
 }
 
+/**
+ * 读取持久化的 iLink 协议状态（轮询游标 + per-chat context token）。
+ * serve 在构造 ILinkClient 前调用：读出的 state 传给 client 构造器即可断点续轮询。
+ * 无状态文件或形态非法时返回 undefined（全新开始）。
+ */
+export async function loadPersistedProtocol(): Promise<ILinkState | undefined> {
+  try {
+    const state = await readPrivateJson<{ protocol?: unknown }>(defaultStatePath())
+    return normalizeProtocol(state.protocol)
+  } catch {
+    return undefined
+  }
+}
+
+/** 只接受合法形态：updatesBuffer 必须是字符串，contextTokens 必须是字符串到字符串的映射。 */
+function normalizeProtocol(raw: unknown): ILinkState | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const rec = raw as Record<string, unknown>
+  if (typeof rec.updatesBuffer !== 'string') return undefined
+  const contextTokens: Record<string, string> = {}
+  if (typeof rec.contextTokens === 'object' && rec.contextTokens !== null && !Array.isArray(rec.contextTokens)) {
+    for (const [key, value] of Object.entries(rec.contextTokens)) {
+      if (typeof value === 'string') contextTokens[key] = value
+    }
+  }
+  return { updatesBuffer: rec.updatesBuffer, contextTokens }
+}
+
 export class Hub {
   readonly dispatcher: ChatDispatcher
   readonly approvals: ApprovalRouter
@@ -105,6 +145,8 @@ export class Hub {
   readonly #seen = new Set<string>()
   /** 有挂起审批时收到的普通文本：在该 chat 的下一条回复末尾附提醒 */
   readonly #reminders = new Map<string, number>()
+  /** 每 chat 的消息环（收发各记一条，封顶 MESSAGE_RING_CAP，纯内存供 Web 面板消息流） */
+  readonly #messages = new Map<string, ChatMessageEntry[]>()
   #credential: StoredCredential | undefined
   #notify: { port: number; close(): Promise<void> } | undefined
   #lock: HubLock | undefined
@@ -115,6 +157,8 @@ export class Hub {
   readonly #pollAbort = new AbortController()
   /** 状态写入串行化：并发事件共享一条写入链，stop 时等待尾部写入完成 */
   #persistChain: Promise<void> = Promise.resolve()
+  /** iLink 协议状态（轮询游标 + context token）：client onStateChange 喂入，随状态落盘 */
+  #protocol: ILinkState | undefined
 
   constructor(deps: HubDeps) {
     this.#deps = deps
@@ -133,6 +177,12 @@ export class Hub {
       run: this.#makeRun(),
       cwdFor: (agentName) => this.#cwdFor(agentName),
       onReply: (chatId, text) => this.#onAgentReply(chatId, text),
+      // 任务终态（完成/失败/中止）：撤销该 chat 的挂起审批（中止/崩溃后的审批已无主，
+      // 否则下一个「同意」会误决议死请求），并清掉待审批提醒
+      onTaskEnd: (chatId) => {
+        this.approvals.cancelChat(chatId)
+        this.#reminders.delete(chatId)
+      },
     })
     // 发件箱全部送完时把「已清空」的断点写回状态，避免重启后重放已投递内容
     this.outbox.onEmpty(() => {
@@ -182,6 +232,16 @@ export class Hub {
   }
 
   /**
+   * iLink 协议状态变化（client 的 onStateChange 接缝，serve 装配）：
+   * 记录最新游标并随状态链落盘，重启后可从断点续轮询、不重放已消费消息。
+   */
+  async recordProtocolState(state: ILinkState): Promise<void> {
+    this.#protocol = state
+    if (this.#stopped) return // stop 的关机尾写已覆盖最终状态
+    await this.#persistState()
+  }
+
+  /**
    * Web 面板扫码确认后调用：重读凭据文件；首次拿到凭据时启动轮询循环
    * （start 时的「等待扫码」空转由此转为正式轮询）。返回是否已登录。
    */
@@ -226,6 +286,8 @@ export class Hub {
 
   async stop(): Promise<void> {
     this.#stopped = true
+    // 关机先停任务：中止所有在跑 agent 进程树、丢弃队列（不执行新任务），再做收尾持久化
+    this.dispatcher.stopAll()
     this.#pollAbort.abort()
     await this.#persistChain.catch(() => undefined)
     // 关机尾写：把最终状态（含最后一条投递触发的断点推进）落盘后再释放资源
@@ -240,6 +302,23 @@ export class Hub {
       this.#lock = undefined
       await lock.release().catch(() => undefined)
     }
+  }
+
+  /** Web 面板消息流：该 chat 的消息环快照（旧→新，封顶 50 条，纯内存不落盘）。 */
+  chatMessages(chatId: string): ChatMessageEntry[] {
+    return [...(this.#messages.get(chatId) ?? [])]
+  }
+
+  #recordMessage(chatId: string, direction: 'in' | 'out', text: string): void {
+    let ring = this.#messages.get(chatId)
+    if (ring === undefined) {
+      ring = []
+      this.#messages.set(chatId, ring)
+    }
+    const excerpt =
+      text.length <= MESSAGE_EXCERPT_CHARS ? text : `${text.slice(0, MESSAGE_EXCERPT_CHARS)}…`
+    ring.push({ direction, text: excerpt, at: Date.now() })
+    if (ring.length > MESSAGE_RING_CAP) ring.splice(0, ring.length - MESSAGE_RING_CAP)
   }
 
   /** 手动推进一次轮询（测试接缝，主循环同一实现）；单次异常静默返回，循环不退出。 */
@@ -266,6 +345,8 @@ export class Hub {
     if (message.userId !== this.#deps.ownerUserId) return
     const text = message.text.trim()
     if (text === '' && message.media.length === 0 && message.mediaErrors.length === 0) return
+    // 消息流记录：过了去重与白名单即入环（命令/审批应答也算收到的消息）
+    this.#recordMessage(message.chatId, 'in', text)
 
     // /sessions 的序号选择最优先：裸数字回复只用于绑定会话，
     // 绝不落入审批词匹配、命令解析或提示词管线
@@ -273,8 +354,8 @@ export class Hub {
 
     // 审批应答优先：该 chat 有挂起审批时，同意/拒绝词直接决议，不进任务队列
     const pendings = this.approvals.pending().filter((a) => a.chatId === message.chatId)
+    const verdict = classifyApprovalReply(text)
     if (pendings.length > 0) {
-      const verdict = classifyApprovalReply(text)
       if (verdict === 'allow' || verdict === 'deny') {
         // 只决议最老的一条：一条「同意」对应一个挂起请求，避免误放行后续请求
         const oldest = pendings.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b))
@@ -283,11 +364,15 @@ export class Hub {
         return
       }
       if (verdict === 'web') {
-        await this.#reply(message.chatId, 'Web 审批面板在 Task 19 接入，先用微信回复')
+        await this.#reply(message.chatId, '可在 Web 面板处理该审批（面板地址见 weishub 启动输出）')
         return
       }
       // 其余文本照常处理，但之后的回复要带上待审批提醒
       this.#reminders.set(message.chatId, pendings.length)
+    } else if (verdict === 'allow' || verdict === 'deny') {
+      // 无挂起审批时收到同意/拒绝词：明确告知没有可决议的审批，不当作提示词下发
+      await this.#reply(message.chatId, '当前没有待处理的审批')
+      return
     }
 
     if (text.startsWith('/')) {
@@ -403,12 +488,14 @@ export class Hub {
       this.#reminders.delete(chatId)
       body += `\n\n（提醒：你有 ${reminder} 项待审批项，回复 同意/拒绝 处理）`
     }
+    this.#recordMessage(chatId, 'out', body)
     this.outbox.enqueue(chatId, body, files)
     await this.#persistState()
   }
 
   /** 所有回复统一走 outbox：通道未就绪时内容留存在发件箱，绝不丢失。 */
   async #reply(chatId: string, text: string): Promise<void> {
+    this.#recordMessage(chatId, 'out', text)
     this.outbox.enqueue(chatId, text)
     await this.#persistState()
   }
@@ -439,6 +526,7 @@ export class Hub {
         modes?: Record<string, string>
         outbox?: Record<string, OutboxItem>
         workspace?: { global?: string; perAgent?: Record<string, string> }
+        protocol?: unknown
       }>(defaultStatePath())
       for (const [chatId, binding] of Object.entries(state.chats ?? {})) {
         if (this.dispatcher.bind(chatId, binding.agentName) !== undefined && binding.sessionId !== undefined) {
@@ -449,6 +537,8 @@ export class Hub {
         if (mode === 'auto' || mode === 'full') this.dispatcher.setMode(chatId, mode as PermissionMode)
       }
       if (state.outbox !== undefined) this.outbox.load(state.outbox)
+      // 协议状态：保留到内存，保证后续持久化不丢游标（client 侧的恢复由 serve 在构造时完成）
+      this.#protocol = normalizeProtocol(state.protocol)
       // 工作目录覆盖：只接受合法形态，其余按无覆盖处理
       const saved = state.workspace
       if (typeof saved?.global === 'string' && saved.global !== '') this.#workspaceOverride.global = saved.global
@@ -474,6 +564,7 @@ export class Hub {
         ...(this.#workspaceOverride.global !== undefined ? { global: this.#workspaceOverride.global } : {}),
         ...(this.#workspaceOverride.perAgent !== undefined ? { perAgent: this.#workspaceOverride.perAgent } : {}),
       },
+      ...(this.#protocol !== undefined ? { protocol: this.#protocol } : {}),
     }
     const write = this.#persistChain.catch(() => undefined).then(async () => {
       try {

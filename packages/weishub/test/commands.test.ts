@@ -231,6 +231,28 @@ test('/stop 运行中时中止并回复已中止当前任务', async () => {
   expect(sent.join('\n')).toContain('已中止当前任务')
 })
 
+test('/stop 无在跑任务但队列非空：回复队列条数，不谎称已中止', async () => {
+  const stub = {
+    stop: () => false,
+    queueInfo: () => ({ running: false, queued: 3 }),
+    busy: () => true,
+  } as unknown as ChatDispatcher
+  const { ctx, sent } = makeCtx({}, stub)
+  expect(await handleCommand('/stop', ctx)).toBe(true)
+  expect(sent.join('\n')).toBe('没有正在运行的任务，队列中的 3 条任务将继续')
+})
+
+test('/stop 双重中止（signal 已中止）：按队列状态如实回复', async () => {
+  const stub = {
+    stop: () => false,
+    queueInfo: () => ({ running: true, queued: 0 }),
+    busy: () => true,
+  } as unknown as ChatDispatcher
+  const { ctx, sent } = makeCtx({}, stub)
+  expect(await handleCommand('/stop', ctx)).toBe(true)
+  expect(sent.join('\n')).toBe('当前没有运行中的任务')
+})
+
 // ---- 别名、大小写、未知与非命令 ----
 
 test('大小写不敏感：/HELP 与 /Status 都可用', async () => {
