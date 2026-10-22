@@ -48,3 +48,29 @@ test('resolve 未知 id 与 cancelChat 无挂起时均为安全 no-op', () => {
   expect(() => router.resolve('no-such-id', 'allow')).not.toThrow()
   expect(() => router.cancelChat('chat-x')).not.toThrow()
 })
+
+test('startRequest 同步返回 id，done 在 resolve 后兑现', async () => {
+  const router = new ApprovalRouter()
+  const { id, done } = router.startRequest('chat-1', 'Bash', 'ls')
+  expect(typeof id).toBe('string')
+  expect(router.pending().map((a) => a.id)).toContain(id)
+  router.resolve(id, 'allow')
+  await expect(done).resolves.toBe('allow')
+})
+
+test('resultOf：挂起返回 pending，决议后保留 allow/deny，未知 id 返回 undefined', async () => {
+  const router = new ApprovalRouter({ timeoutMs: 30 })
+  const { id } = router.startRequest('chat-1', 'Bash', 'a')
+  expect(router.resultOf(id)).toBe('pending')
+
+  router.resolve(id, 'deny')
+  expect(router.resultOf(id)).toBe('deny')
+  expect(router.resultOf(id)).toBe('deny') // 决议后持续可查，不是一次性
+
+  const t = router.startRequest('chat-2', 'Bash', 'b')
+  expect(router.resultOf(t.id)).toBe('pending')
+  await t.done // 超时
+  expect(router.resultOf(t.id)).toBe('timeout')
+
+  expect(router.resultOf('no-such-id')).toBeUndefined()
+})
