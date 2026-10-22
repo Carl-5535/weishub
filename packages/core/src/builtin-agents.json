@@ -9,7 +9,7 @@
     "resume": ["--resume", "{{sessionId}}"],
     "approval": "permission-prompt-tool",
     "permissionFlags": {
-      "auto": ["--permission-mode", "workspace-write"],
+      "auto": ["--permission-mode", "acceptEdits"],
       "full": ["--dangerously-skip-permissions"]
     },
     "workspace": null,

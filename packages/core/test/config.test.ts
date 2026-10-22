@@ -30,7 +30,7 @@ test('内置配置包含 claude，字段与既定值完全一致', async () => {
     resume: ['--resume', '{{sessionId}}'],
     approval: 'permission-prompt-tool',
     permissionFlags: {
-      auto: ['--permission-mode', 'workspace-write'],
+      auto: ['--permission-mode', 'acceptEdits'],
       full: ['--dangerously-skip-permissions'],
     },
     workspace: null,
