@@ -294,24 +294,33 @@
       $('chat-pane').replaceChildren(el('div', 'empty', '在微信里给机器人发一条消息，会话会出现在这里。'))
       return
     }
-    if (selected && !state.chats.some((c) => c.chatId === selected)) selected = null
-    if (!selected) selected = state.chats[0].chatId
 
-    for (const chat of state.chats) {
+    // 多 agent 车道：同一会话可能有多条（每 agent 一条），按会话合并展示
+    const grouped = new Map()
+    for (const lane of state.chats) {
+      const lanes = grouped.get(lane.chatId) ?? []
+      lanes.push(lane)
+      grouped.set(lane.chatId, lanes)
+    }
+    if (selected && !grouped.has(selected)) selected = null
+    if (!selected) selected = grouped.keys().next().value
+
+    for (const [chatId, lanes] of grouped) {
       const item = el('button', 'chat-item')
       item.type = 'button'
-      item.setAttribute('aria-selected', chat.chatId === selected ? 'true' : 'false')
-      item.appendChild(el('span', 'cid', chat.chatId))
+      item.setAttribute('aria-selected', chatId === selected ? 'true' : 'false')
+      item.appendChild(el('span', 'cid', chatId))
       const tags = el('span', 'tags')
-      tags.appendChild(el('span', 'chip agent', chat.agentName))
-      tags.appendChild(el('span', 'chip', chat.mode))
-      if (chat.running) tags.appendChild(el('span', 'chip live', '运行中'))
-      if (chat.queued > 0) tags.appendChild(el('span', 'chip live', `排队 ${chat.queued}`))
-      const pendingOut = (state.outbox[chat.chatId]?.chunks.length ?? 0) - (state.outbox[chat.chatId]?.next ?? 0)
+      for (const lane of lanes) {
+        tags.appendChild(el('span', 'chip agent', lane.agentName))
+        if (lane.running) tags.appendChild(el('span', 'chip live', `运行中`))
+        if (lane.queued > 0) tags.appendChild(el('span', 'chip live', `排队 ${lane.queued}`))
+      }
+      const pendingOut = (state.outbox[chatId]?.chunks.length ?? 0) - (state.outbox[chatId]?.next ?? 0)
       if (pendingOut > 0) tags.appendChild(el('span', 'chip live', `待发 ${pendingOut}`))
       item.appendChild(tags)
       item.addEventListener('click', () => {
-        selected = chat.chatId
+        selected = chatId
         renderChats()
       })
       list.appendChild(item)
@@ -348,7 +357,11 @@
     }
     head.textContent = ''
     head.appendChild(el('span', 'cid', chat.chatId))
-    head.appendChild(el('span', 'chip agent', chat.agentName))
+    // 多车道会话：把每条车道的 agent 都列出来
+    for (const lane of state.chats.filter((c) => c.chatId === chat.chatId)) {
+      head.appendChild(el('span', 'chip agent', lane.agentName))
+      if (lane.running) head.appendChild(el('span', 'chip live', '运行中'))
+    }
     if (chat.sessionId) head.appendChild(el('span', 'chip', '会话恢复'))
     if (list.dataset.chat !== chat.chatId) {
       list.dataset.chat = chat.chatId

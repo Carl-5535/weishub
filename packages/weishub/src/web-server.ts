@@ -149,12 +149,13 @@ export async function startWebServer(
     // ---- API ----
     if (req.method === 'GET' && path === '/api/state') {
       const snapshot = hub.dispatcher.snapshot()
-      const chats = Object.entries(snapshot.chats).map(([chatId, binding]) => ({
-        chatId,
+      // 车道模型：每 (会话, agent) 一条；消息环按会话共享
+      const chats = snapshot.chats.map((binding) => ({
+        chatId: binding.chatId,
         agentName: binding.agentName,
         sessionId: binding.sessionId,
-        mode: snapshot.modes[chatId] ?? 'auto',
-        ...hub.dispatcher.queueInfo(chatId),
+        mode: snapshot.modes[binding.chatId] ?? 'auto',
+        ...hub.dispatcher.queueInfo(binding.chatId, binding.agentName),
       }))
       return send(res, 200, {
         loggedIn: hub.loggedIn,

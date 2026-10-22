@@ -162,7 +162,7 @@ test('/sessions agent 无会话存储时回复不支持', async () => {
 test('/new 清除 sessionId 并回复已开启新会话', async () => {
   const { ctx, sent, dispatcher } = makeCtx()
   dispatcher.bind('owner-1', 'claude')
-  dispatcher.setSession('owner-1', 'old-session')
+  dispatcher.setSession('owner-1', 'claude', 'old-session')
   expect(await handleCommand('/new', ctx)).toBe(true)
   expect(dispatcher.binding('owner-1')?.sessionId).toBeUndefined()
   expect(sent.join('\n')).toContain('已开启新会话')
@@ -202,7 +202,7 @@ test('/permission 非法参数回复用法且不改模式', async () => {
 test('/status 汇报 agent、会话、模式、队列、待审批与发件箱', async () => {
   const { ctx, sent, dispatcher } = makeCtx()
   dispatcher.bind('owner-1', 'claude')
-  dispatcher.setSession('owner-1', 'sess-9')
+  dispatcher.setSession('owner-1', 'claude', 'sess-9')
   ctx.approvals.startRequest('owner-1', 'Bash', '{}')
   ctx.outbox.enqueue('owner-1', '一条待发内容')
   expect(await handleCommand('/status', ctx)).toBe(true)

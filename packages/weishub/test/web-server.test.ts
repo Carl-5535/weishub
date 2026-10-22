@@ -215,6 +215,8 @@ test('/api/state 返回 snapshot、pending 审批与登录态', async () => {
   const { url } = await makeServer(kit.hub)
   kit.hub.dispatcher.bind('room-1', 'codex')
   kit.hub.dispatcher.setMode('room-1', 'full')
+  // 车道模型：车道在首条消息时创建
+  kit.hub.dispatcher.submit('room-1', '产生 codex 车道')
   const { id } = kit.hub.approvals.startRequest('room-1', 'Bash', '{"command":"ls"}')
   const res = await get(url, '/api/state')
   expect(res.status).toBe(200)
@@ -356,17 +358,17 @@ test('GET / 返回面板页面；GET /app.js 返回脚本', async () => {
   expect((await get(url, '/nope.js')).status).toBe(404)
 })
 
-test('PUT /api/agent 切换唯一启用的 agent，并把已绑定会话改绑过去', async () => {
+test('PUT /api/agent 切换默认 agent；既有车道保持独立不被打断', async () => {
   const kit = makeHub()
   const { url } = await makeServer(kit.hub)
   kit.hub.dispatcher.bind('room-a', 'claude')
-  kit.hub.dispatcher.setSession('room-a', 'sess-1')
+  kit.hub.dispatcher.setSession('room-a', 'claude', 'sess-1')
 
   const res = await putJson(url, '/api/agent', { name: 'codex' })
   expect(res.status).toBe(200)
   expect((await res.json()).enabledAgent).toBe('codex')
 
-  // 唯一性：只有 codex 是启用的
+  // 唯一性：只有 codex 是启用的（= 默认 agent）
   const state = (await (await get(url, '/api/state')).json()) as {
     agents: { name: string; enabled: boolean }[]
     enabledAgent: string | null
@@ -375,10 +377,10 @@ test('PUT /api/agent 切换唯一启用的 agent，并把已绑定会话改绑�
   expect(state.enabledAgent).toBe('codex')
   expect(state.agents.filter((a) => a.enabled)).toHaveLength(1)
   expect(state.agents.find((a) => a.enabled)!.name).toBe('codex')
-  // 改绑：现有聊天跟随启用的 agent，且换 agent 会重置会话
-  const chat = state.chats.find((c) => c.chatId === 'room-a')!
-  expect(chat.agentName).toBe('codex')
-  expect(chat.sessionId).toBeUndefined()
+  // 车道语义：claude 车道（含会话）原样保留，不被默认切换打断；
+  // 后续无 @ 消息才走 codex，@claude 仍走 claude 车道（会话接续）
+  const chat = state.chats.find((c) => c.chatId === 'room-a' && c.agentName === 'claude')!
+  expect(chat.sessionId).toBe('sess-1')
 })
 
 test('PUT /api/agent 拒绝未安装的 agent', async () => {

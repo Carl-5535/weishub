@@ -16,7 +16,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b packages/channel-wechat packages/core packages/weishub",
-    "build": "tsc -b packages/channel-wechat packages/core packages/weishub"
+    "build": "tsc -b packages/channel-wechat packages/core packages/weishub && node scripts/fix-exec-bits.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

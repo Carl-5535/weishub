@@ -1,7 +1,7 @@
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { InboundMessage, ILinkState } from '@weishub/channel-wechat'
 import { defaultCredentialPath, readCredential } from '@weishub/channel-wechat'
 import type { AgentConfig, RunOptions, TaskResult } from '@weishub/core'
@@ -510,7 +510,8 @@ test('claude permission-prompt-tool + auto 模式：运行时写临时 --mcp-con
   expect(serverConfig!.args[0]).toMatch(/approval-mcp\.js$/)
   expect(serverConfig!.env.WEISHUB_PORT).toBe(String(kit.hub.notifyPort))
   expect(serverConfig!.env.WEISHUB_TOKEN).toBeTruthy()
-  expect(serverConfig!.env.WEISHUB_CHAT_ID).toBe('owner-1')
+  // 车道作用域：审批归属「会话::agent」，多 agent 并行时互不串扰
+  expect(serverConfig!.env.WEISHUB_CHAT_ID).toBe('owner-1::claude')
   // 运行结束后临时配置文件被清理
   await expect(access(serverConfigPath!)).rejects.toMatchObject({ code: 'ENOENT' })
 })
@@ -748,4 +749,60 @@ test('凭据健康：状态随 state.json 持久化', async () => {
   const saved = JSON.parse(await readFile(join(homeDir, 'state.json'), 'utf8')) as { lastActivityAt?: string }
   expect(typeof saved.lastActivityAt).toBe('string')
   expect(Date.now() - Date.parse(saved.lastActivityAt!)).toBeLessThan(60_000)
+})
+
+const agentGemini: AgentConfig = { ...agentClaude, name: 'gemini', detect: 'gemini' }
+
+describe('@提及路由：多 agent 并行', () => {
+  const sentText = (kit: HubKit) => kit.sent.map((s) => s.text).join('\n')
+
+  test('@claude 前缀把消息路由给 claude 车道；无 @ 走默认', async () => {
+    const kit = makeHub({ allAgents: [agentClaude, agentCodex] })
+    await kit.hub.handleInbound(msg({ text: '写首诗' })) // 默认（claude）车道
+    await kit.hub.handleInbound(msg({ text: '@codex 跑下测试' })) // 提及 codex 车道
+    await settle(kit, 2)
+    expect(kit.calls).toHaveLength(2)
+    expect(kit.calls[0]!.config.name).toBe('claude')
+    expect(kit.calls[1]!.config.name).toBe('codex')
+    expect(kit.calls[1]!.options.prompt).toBe('跑下测试')
+  })
+
+  test('@未安装 agent 给出明确提示，不进队列', async () => {
+    const kit = makeHub({ allAgents: [agentClaude, agentCodex, agentGemini] })
+    await kit.hub.handleInbound(msg({ text: '@gemini 你好' }))
+    await drain(kit.hub)
+    expect(sentText(kit)).toContain('已配置但未安装')
+    expect(kit.calls).toHaveLength(0)
+  })
+
+  test('@未知 agent 给出提示', async () => {
+    const kit = makeHub({ allAgents: [agentClaude, agentCodex] })
+    await kit.hub.handleInbound(msg({ text: '@不存在的 你好' }))
+    await drain(kit.hub)
+    expect(sentText(kit)).toContain('没有叫')
+  })
+
+  test('@后没有任务内容时提示用法', async () => {
+    const kit = makeHub({ allAgents: [agentClaude, agentCodex] })
+    await kit.hub.handleInbound(msg({ text: '@codex ' }))
+    await drain(kit.hub)
+    expect(sentText(kit)).toContain('后面要跟任务内容')
+  })
+
+  test('两条车道并行：互不排队，回复带 agent 前缀', async () => {
+    const kit = makeHub({ allAgents: [agentClaude, agentCodex] }, async (_prompt, options) => {
+      if (options.prompt.includes('慢')) await new Promise((r) => setTimeout(r, 400))
+      return { text: `${options.prompt} 完成`, exitCode: 0 }
+    })
+    await kit.hub.handleInbound(msg({ text: '@codex 慢任务' })) // codex 车道，慢
+    await kit.hub.handleInbound(msg({ text: '快任务' })) // 默认（claude）车道，快
+    await settle(kit, 2)
+    // 快车道先完成：如果被慢车道阻塞，此时 calls 只有 1
+    expect(kit.calls).toHaveLength(2)
+    // 多车道会话回复带 agent 前缀（慢车道 400ms 后完成）
+    await vi.waitFor(() => {
+      expect(sentText(kit)).toContain('「codex」')
+      expect(sentText(kit)).toContain('「claude」')
+    })
+  })
 })

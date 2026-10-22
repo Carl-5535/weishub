@@ -209,12 +209,12 @@ export class Hub {
       onReply: (chatId, text) => this.#onAgentReply(chatId, text),
       // 任务终态（完成/失败/中止）：撤销该 chat 的挂起审批（中止/崩溃后的审批已无主，
       // 否则下一个「同意」会误决议死请求），并清掉待审批提醒
-      onTaskEnd: (chatId) => {
+      onTaskEnd: (chatId, agentName) => {
         // 只有确实撤销了挂起审批才登记，供下一条同意/拒绝词给出说明而不是误下发
-        if (this.approvals.pending().some((a) => a.chatId === chatId)) {
+        if (this.approvals.pending().some((a) => a.chatId === chatId || a.chatId.startsWith(chatId + '::'))) {
           this.#cancelledApprovals.add(chatId)
         }
-        this.approvals.cancelChat(chatId)
+        this.approvals.cancelChat(chatId, agentName)
         this.#reminders.delete(chatId)
       },
     })
@@ -302,11 +302,15 @@ export class Hub {
   async enableAgent(name: string): Promise<void> {
     const config = this.#deps.agents.find((a) => a.name === name)
     if (config === undefined) throw new Error(`未安装或未发现 agent「${name}」`)
+    // 只改默认 agent：@提及的车道独立存在，不打断；已有会话保持原样
     this.#enabledAgent = name
-    for (const chatId of Object.keys(this.dispatcher.snapshot().chats)) {
-      this.dispatcher.bind(chatId, name)
-    }
+    this.dispatcher.bind(this.#ownerChatId(), name)
     await this.#persistState()
+  }
+
+  /** owner 会话 id（owner-only 模型下的唯一真实微信会话）。 */
+  #ownerChatId(): string {
+    return this.#deps.ownerUserId
   }
 
   /**
@@ -528,7 +532,10 @@ export class Hub {
     if (text !== '' && resolveSelection(message.chatId, text)) return
 
     // 审批应答优先：该 chat 有挂起审批时，同意/拒绝词直接决议，不进任务队列
-    const pendings = this.approvals.pending().filter((a) => a.chatId === message.chatId)
+    // 审批的 chatId 是车道作用域（chatId::agent），按前缀归属到本会话
+    const pendings = this.approvals.pending().filter(
+      (a) => a.chatId === message.chatId || a.chatId.startsWith(message.chatId + '::'),
+    )
     const verdict = classifyApprovalReply(text)
     if (pendings.length > 0) {
       if (verdict === 'allow' || verdict === 'deny') {
@@ -595,9 +602,34 @@ export class Hub {
       await this.#reply(message.chatId, `已绑定 agent「${enabled}」，直接发消息即可开始。`)
     }
 
-    const outcome = this.dispatcher.submit(message.chatId, prompt)
+    // @提及路由：@<agent> 任务 → 交给对应 agent 的车道（可与默认 agent 并行）
+    let agentOverride: string | undefined
+    // agent 名允许任意非空白（含中文）；任务内容可省略（省略时提示用法）
+    const mention = /^@([^\s，,]+)(?:[\s，,]([\s\S]*))?$/.exec(prompt)
+    if (mention !== null) {
+      const name = mention[1]!.toLowerCase()
+      const configured = this.#deps.allAgents?.find((a) => a.name.toLowerCase() === name)
+      if (configured === undefined) {
+        await this.#reply(message.chatId, `没有叫「${name}」的 agent。用 /agents 查看列表，或直接发消息给默认 agent。`)
+        return
+      }
+      if (!this.#deps.agents.some((a) => a.name === configured.name)) {
+        await this.#reply(message.chatId, `「${configured.name}」已配置但未安装，装好后重启微枢即可。`)
+        return
+      }
+      agentOverride = configured.name
+      prompt = (mention[2] ?? '').trim()
+      if (prompt === '') {
+        await this.#reply(message.chatId, `@${configured.name} 后面要跟任务内容，例如「@${configured.name} 跑一下测试」`)
+        return
+      }
+    }
+
+    const outcome = this.dispatcher.submit(message.chatId, prompt, agentOverride)
     if (outcome === 'rejected-busy') {
       await this.#reply(message.chatId, '任务队列已满，请稍后再试')
+    } else if (outcome === 'rejected-unknown-agent') {
+      await this.#reply(message.chatId, `没有叫「${agentOverride}」的 agent`)
     }
   }
 
@@ -630,7 +662,8 @@ export class Hub {
               env: {
                 WEISHUB_PORT: String(this.#notify?.port ?? this.#deps.notifyPort ?? ''),
                 WEISHUB_TOKEN: this.#notifyToken,
-                WEISHUB_CHAT_ID: chatId,
+                // 车道作用域：审批请求归属「会话::agent」，多 agent 并行时互不串扰
+                WEISHUB_CHAT_ID: `${chatId}::${config.name}`,
               },
             },
           },
@@ -700,6 +733,8 @@ export class Hub {
     try {
       const state = await readPrivateJson<{
         chats?: Record<string, { agentName: string; sessionId?: string }>
+        lanes?: { chatId: string; agentName: string; sessionId?: string }[]
+        defaults?: Record<string, string>
         modes?: Record<string, string>
         outbox?: Record<string, OutboxItem>
         workspace?: { global?: string; perAgent?: Record<string, string> }
@@ -708,10 +743,17 @@ export class Hub {
         lastActivityAt?: string
         credentialRejected?: string
       }>(defaultStatePath())
+      // 新格式：每车道一条
+      for (const lane of state.lanes ?? []) {
+        this.dispatcher.restoreLane(lane.chatId, lane.agentName, lane.sessionId)
+      }
+      // 旧格式迁移：chats Record → 车道
       for (const [chatId, binding] of Object.entries(state.chats ?? {})) {
-        if (this.dispatcher.bind(chatId, binding.agentName) !== undefined && binding.sessionId !== undefined) {
-          this.dispatcher.setSession(chatId, binding.sessionId)
-        }
+        this.dispatcher.restoreLane(chatId, binding.agentName, binding.sessionId)
+        this.dispatcher.restoreDefault(chatId, binding.agentName)
+      }
+      for (const [chatId, agentName] of Object.entries(state.defaults ?? {})) {
+        this.dispatcher.restoreDefault(chatId, agentName)
       }
       for (const [chatId, mode] of Object.entries(state.modes ?? {})) {
         if (mode === 'auto' || mode === 'full') this.dispatcher.setMode(chatId, mode as PermissionMode)
@@ -747,8 +789,9 @@ export class Hub {
   async #persistState(): Promise<void> {
     const snapshot = this.dispatcher.snapshot()
     const value = {
-      chats: snapshot.chats,
+      lanes: snapshot.chats,
       modes: snapshot.modes,
+      defaults: snapshot.defaults,
       outbox: this.outbox.pending(),
       workspace: {
         ...(this.#workspaceOverride.global !== undefined ? { global: this.#workspaceOverride.global } : {}),

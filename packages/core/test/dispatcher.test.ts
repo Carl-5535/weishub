@@ -121,12 +121,12 @@ test('bind 未知 agent 返回 undefined，不产生绑定', () => {
   expect(d.binding('c1')).toBeUndefined()
 })
 
-test('bind 已知 agent 返回其配置并建立绑定', () => {
+test('bind 已知 agent 返回其配置并设为默认', () => {
   const fake = instantRun()
   const { deps } = makeDeps(fake.run)
   const d = new ChatDispatcher(deps)
   expect(d.bind('c1', 'claude')).toBe(agentA)
-  expect(d.binding('c1')).toEqual<ChatBinding>({ agentName: 'claude' })
+  expect(d.binding('c1')).toEqual<ChatBinding>({ chatId: 'c1', agentName: 'claude' })
 })
 
 test('首条消息：run 收到无 sessionId 的 RunOptions，结果 sessionId 写回 binding', async () => {
@@ -141,7 +141,7 @@ test('首条消息：run 收到无 sessionId 的 RunOptions，结果 sessionId �
   expect(fake.calls[0]!.options.sessionId).toBeUndefined()
   expect(fake.calls[0]!.options.mode).toBe('auto')
   expect(fake.calls[0]!.options.cwd).toBe('/cwd/claude')
-  expect(d.binding('c1')).toEqual<ChatBinding>({ agentName: 'claude', sessionId: 'sess-1' })
+  expect(d.binding('c1')).toEqual<ChatBinding>({ chatId: 'c1', agentName: 'claude', sessionId: 'sess-1' })
 })
 
 test('第二条消息携带 sessionId resume，且 run 透传 dispatcher 写入的 sessionId', async () => {
@@ -352,12 +352,12 @@ test('setSession 显式设置与清除（/new 语义）', async () => {
   const { deps } = makeDeps(fake.run)
   const d = new ChatDispatcher(deps)
   d.bind('c1', 'claude')
-  d.setSession('c1', 'manual-1')
+  d.setSession('c1', 'claude', 'manual-1')
   expect(d.binding('c1')?.sessionId).toBe('manual-1')
   d.submit('c1', '问')
   await drain()
   expect(fake.calls[0]!.options.sessionId).toBe('manual-1')
-  d.setSession('c1', undefined)
+  d.setSession('c1', 'claude', undefined)
   expect(d.binding('c1')?.sessionId).toBeUndefined()
   d.submit('c1', '再问')
   await drain()
@@ -377,33 +377,37 @@ test('mode：默认 auto，setMode 后每次 run 透传', async () => {
   expect(fake.calls[0]!.options.mode).toBe('full')
 })
 
-test('snapshot 返回绑定与模式的只读视图', () => {
+test('snapshot 返回车道、默认 agent 与模式的只读视图', () => {
   const fake = instantRun()
   const { deps } = makeDeps(fake.run)
   const d = new ChatDispatcher(deps)
   d.bind('c1', 'claude')
-  d.setSession('c1', 's1')
+  d.setSession('c1', 'claude', 's1')
   d.setMode('c1', 'full')
   d.bind('c2', 'codex')
   const snap = d.snapshot()
-  expect(snap.chats).toEqual({
-    c1: { agentName: 'claude', sessionId: 's1' },
-    c2: { agentName: 'codex' },
-  })
+  expect(snap.chats).toEqual([{ chatId: 'c1', agentName: 'claude', sessionId: 's1' }])
+  expect(snap.defaults).toEqual({ c1: 'claude', c2: 'codex' })
   expect(snap.modes).toEqual({ c1: 'full' })
 })
 
-test('rebind 到不同 agent 重置 sessionId，同 agent 保留', () => {
+test('车道模型：bind 改默认不触碰既有车道的会话', () => {
   const fake = instantRun()
   const { deps } = makeDeps(fake.run)
   const d = new ChatDispatcher(deps)
   d.bind('c1', 'claude')
-  d.setSession('c1', 's-old')
+  d.setSession('c1', 'claude', 's-old')
+  // 改默认到 codex：claude 车道的会话原样保留
   d.bind('c1', 'codex')
-  expect(d.binding('c1')?.sessionId).toBeUndefined()
-  d.setSession('c1', 's-new')
-  d.bind('c1', 'codex')
-  expect(d.binding('c1')?.sessionId).toBe('s-new')
+  expect(d.defaultAgentOf('c1')).toBe('codex')
+  expect(d.binding('c1')?.sessionId).toBeUndefined() // 默认车道（codex）还没有会话
+  // claude 车道的会话仍在：显式按 agent 设置/读取
+  d.setSession('c1', 'claude', 's-new')
+  d.setSession('c1', 'codex', 's-codex')
+  expect(d.snapshot().chats).toEqual([
+    { chatId: 'c1', agentName: 'claude', sessionId: 's-new' },
+    { chatId: 'c1', agentName: 'codex', sessionId: 's-codex' },
+  ])
 })
 
 test('onReply 自身拒绝不会让 submit 抛出或卡死队列', async () => {
@@ -467,7 +471,7 @@ test('stop 中止当前任务后，排队任务仍按序执行', async () => {
   expect(replies.map((r) => r.text)).toEqual(['已中止', '答二', '答三'])
 })
 
-test('队列有任务时 rebind 到另一 agent：排队任务换 agent 执行且旧 sessionId 失效', async () => {
+test('车道模型：排队任务留在原车道，rebind 只改默认（排队任务不换 agent）', async () => {
   const first = deferred()
   const run = vi.fn((config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
     void options
@@ -477,20 +481,22 @@ test('队列有任务时 rebind 到另一 agent：排队任务换 agent 执行�
   const { deps, replies } = makeDeps(run)
   const d = new ChatDispatcher(deps)
   d.bind('c1', 'claude')
-  d.setSession('c1', 's-old')
+  d.setSession('c1', 'claude', 's-old')
   expect(d.submit('c1', '一')).toBe('accepted')
   expect(d.submit('c1', '二')).toBe('queued')
-  // 任务一还在跑时 rebind：sessionId 立即重置
+  // 任务一在跑时改默认到 codex：claude 车道（含排队任务与 sessionId）不动
   d.bind('c1', 'codex')
-  expect(d.binding('c1')?.sessionId).toBeUndefined()
-  first.resolve({ text: '答一', exitCode: 0 }) // 不产生新 sessionId
+  first.resolve({ text: '答一', exitCode: 0 })
   await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
   expect(run).toHaveBeenCalledTimes(2)
-  // 排队任务在 codex 配置下执行，且不带被重置前的旧会话
-  expect(run.mock.calls[1]![0].name).toBe('codex')
-  expect(run.mock.calls[1]![1].sessionId).toBeUndefined()
-  expect(run.mock.calls[1]![1].cwd).toBe('/cwd/codex')
-  expect(replies.map((r) => r.text)).toEqual(['答一', 'codex 答'])
+  // 排队任务仍在 claude 车道用 claude 执行，并保留车道会话
+  expect(run.mock.calls[1]![0].name).toBe('claude')
+  expect(run.mock.calls[1]![1].sessionId).toBe('s-old')
+  expect(run.mock.calls[1]![1].cwd).toBe('/cwd/claude')
+  expect(replies.map((r) => r.text)).toEqual(['答一', '答一']) // 排队任务仍在 claude 车道，同一 promise 同回复
+  // 新的无 @ 消息才会走 codex
+  expect(d.submit('c1', '新消息')).toBe('accepted')
+  await vi.waitFor(() => expect(run.mock.calls[2]![0].name).toBe('codex'))
 })
 
 test('同一聊天连续两次 stop 只中止一次，只回复一条「已中止」', async () => {

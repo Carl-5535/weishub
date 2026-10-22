@@ -27,7 +27,8 @@ export interface CommandContext {
 const HELP_TEXT = [
   '微枢命令：',
   '/agents 列出可用 agent（含未安装）',
-  '/agent <名字> 切换绑定的 agent',
+  '/agent <名字> 切换默认 agent',
+  '@<agent> <任务> 交给指定 agent 执行（可与默认 agent 并行）',
   '/sessions 列出该 agent 的历史会话，回复序号切换',
   '/new 开启新会话',
   '/status 查看状态',
@@ -78,8 +79,8 @@ export async function handleCommand(input: string, ctx: CommandContext): Promise
       await replySessions(ctx)
       break
     case 'new':
-      ctx.dispatcher.setSession(ctx.chatId, undefined)
-      await ctx.reply('已开启新会话')
+      ctx.dispatcher.clearAllSessions(ctx.chatId)
+      await ctx.reply('已开启新会话（所有 agent 的上下文都清空）')
       break
     case 'status':
       await replyStatus(ctx)
@@ -128,6 +129,7 @@ async function replyAgentBind(ctx: CommandContext, name: string): Promise<void> 
 // ---- /sessions 与序号选择 ----
 
 interface PendingSelection {
+  agentName: string
   items: SessionInfo[]
   onPick(session: SessionInfo | undefined): void | Promise<void>
 }
@@ -174,13 +176,14 @@ async function replySessions(ctx: CommandContext): Promise<void> {
     return
   }
   pendingSelections.set(ctx.chatId, {
+    agentName: config.name,
     items: sessions,
     onPick: async (picked) => {
       if (picked === undefined) {
         await ctx.reply('序号超出范围，请重新执行 /sessions')
         return
       }
-      ctx.dispatcher.setSession(ctx.chatId, picked.id)
+      ctx.dispatcher.setSession(ctx.chatId, config.name, picked.id)
       await ctx.reply(`已切换到会话「${picked.title || picked.id}」`)
     },
   })

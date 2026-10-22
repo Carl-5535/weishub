@@ -83,10 +83,18 @@ export class ApprovalRouter {
     return this.#resolved.get(id)?.decision
   }
 
-  /** 任务中止 / 通道失效时撤销该 chat 的全部挂起请求，立即 deny */
-  cancelChat(chatId: string): void {
+  /**
+   * 撤销挂起请求，立即 deny。
+   * 多 agent 并行后审批的 chatId 形如 `chatId::agent`（车道作用域）：
+   * - agent 省略 → 撤销该 chat 全部（含所有车道）
+   * - agent 给定 → 只撤该 agent 车道的（其他车道的审批不受影响）
+   */
+  cancelChat(chatId: string, agentName?: string): void {
     for (const entry of [...this.#pending.values()]) {
-      if (entry.approval.chatId !== chatId) continue
+      const approvalChatId = entry.approval.chatId
+      const sameChat = approvalChatId === chatId || approvalChatId.startsWith(chatId + '::')
+      if (!sameChat) continue
+      if (agentName !== undefined && approvalChatId !== chatId && !approvalChatId.endsWith('::' + agentName)) continue
       this.#pending.delete(entry.approval.id)
       clearTimeout(entry.timer)
       entry.settle('deny')
