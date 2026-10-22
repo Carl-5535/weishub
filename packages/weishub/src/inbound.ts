@@ -147,6 +147,8 @@ export class Hub {
   readonly #reminders = new Map<string, number>()
   /** 每 chat 的消息环（收发各记一条，封顶 MESSAGE_RING_CAP，纯内存供 Web 面板消息流） */
   readonly #messages = new Map<string, ChatMessageEntry[]>()
+  /** 任务终态撤销过挂起审批的 chat：其后的下一条同意/拒绝词视为对死请求的回应 */
+  readonly #cancelledApprovals = new Set<string>()
   #credential: StoredCredential | undefined
   #notify: { port: number; close(): Promise<void> } | undefined
   #lock: HubLock | undefined
@@ -180,6 +182,10 @@ export class Hub {
       // 任务终态（完成/失败/中止）：撤销该 chat 的挂起审批（中止/崩溃后的审批已无主，
       // 否则下一个「同意」会误决议死请求），并清掉待审批提醒
       onTaskEnd: (chatId) => {
+        // 只有确实撤销了挂起审批才登记，供下一条同意/拒绝词给出说明而不是误下发
+        if (this.approvals.pending().some((a) => a.chatId === chatId)) {
+          this.#cancelledApprovals.add(chatId)
+        }
         this.approvals.cancelChat(chatId)
         this.#reminders.delete(chatId)
       },
@@ -369,8 +375,10 @@ export class Hub {
       }
       // 其余文本照常处理，但之后的回复要带上待审批提醒
       this.#reminders.set(message.chatId, pendings.length)
-    } else if (verdict === 'allow' || verdict === 'deny') {
-      // 无挂起审批时收到同意/拒绝词：明确告知没有可决议的审批，不当作提示词下发
+    } else if ((verdict === 'allow' || verdict === 'deny') && this.#cancelledApprovals.has(message.chatId) && message.media.length === 0) {
+      // 刚因任务终态撤销过审批：这条同意/拒绝是对已死请求的回应，回一句说明而不是下发给 agent。
+      // 仅在「撤销过 + 不带附件」时拦一次，避免吃掉 agent 自己的 yes/no 追问（如「要继续吗？yes」）。
+      this.#cancelledApprovals.delete(message.chatId)
       await this.#reply(message.chatId, '当前没有待处理的审批')
       return
     }

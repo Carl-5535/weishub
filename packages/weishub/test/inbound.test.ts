@@ -236,12 +236,36 @@ test('「网页」回复不消费审批，提示可去 Web 面板处理', async 
   expect(await done).toBe('allow')
 })
 
-test('无挂起审批时收到同意/拒绝词：回复没有待处理审批，不当作提示词下发', async () => {
+test('无挂起审批、无撤销记录时，同意/拒绝词照常作为提示词下发给 agent', async () => {
+  // agent 自己的追问（「要继续吗？yes」）必须能收到回答——这是常见交互，不能被审批逻辑吞掉
   const { hub, sent, calls } = makeHub()
-  await hub.handleInbound(msg({ text: '同意' }))
+  await hub.handleInbound(msg({ text: 'yes' }))
   await drain(hub)
-  expect(sent.map((s) => s.text).join('\n')).toContain('当前没有待处理的审批')
-  expect(calls).toHaveLength(0)
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.options.prompt).toBe('yes')
+  expect(sent.map((s) => s.text).join('\n')).not.toContain('当前没有待处理的审批')
+})
+
+test('带附件的同意词即使刚撤销过审批也照常下发（附件不能被丢弃）', async () => {
+  const kit = makeHub(undefined, (_prompt, options) => {
+    return new Promise<TaskResult>((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new Error('中止')), { once: true })
+    })
+  })
+  await kit.hub.handleInbound(msg({ text: '跑长任务' }))
+  await vi.waitFor(() => expect(kit.calls).toHaveLength(1))
+  kit.hub.approvals.startRequest('owner-1', 'Bash', '{}')
+  await kit.hub.handleInbound(msg({ text: '/stop' }))
+  await vi.waitFor(() => expect(kit.hub.approvals.pending()).toHaveLength(0))
+  await drain(kit.hub)
+  // 撤销后的下一条允许词带附件：必须作为新任务下发，附件注入
+  await kit.hub.handleInbound(msg({
+    text: 'yes',
+    media: [{ kind: 'image', name: 'a.jpg', mediaType: 'image/jpeg', data: new Uint8Array([1, 2, 3]) }],
+  }))
+  await drain(kit.hub)
+  expect(kit.calls.length).toBeGreaterThanOrEqual(2)
+  expect(kit.calls.at(-1)!.options.prompt).toContain('[附件]')
 })
 
 test('任务终态撤销该 chat 的挂起审批：/stop 后 pending 清空，后续「同意」不再决议任何请求', async () => {
