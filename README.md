@@ -1,4 +1,6 @@
-# 微枢 weishub
+# <img src="assets/icon.svg" width="28" alt="微枢图标"> 微枢 weishub
+
+![微枢 weishub——微信里 @ 谁，谁就开工](assets/cover.png)
 
 在微信里指挥本机的 AI agent：手机发一条消息，claude / codex 等 CLI agent 在你的电脑上干活，结果直接回到微信对话框。
 
