@@ -1,129 +1,97 @@
-# 微枢（weishub）
+# 微枢 weishub
 
-把微信变成 AI agent 的随身入口：手机微信发消息 → 本机 hub 分发给 claude / codex 等 CLI agent → 结果回到微信；agent 也能随时用 `wx` 主动推送、请求审批、外发文件。
+在微信里指挥本机的 AI agent：手机发一条消息，claude / codex 等 CLI agent 在你的电脑上干活，结果直接回到微信对话框。
 
-```
-手机微信 ⇄ iLink Bot API ⇄ ┌─ weishub（单进程）──────────────────┐
-                            │ channel-wechat                      │
-                            │  ├─ ILinkClient 长轮询/发送/媒体     │
-                            │  ├─ qrlogin 扫码                    │
-                            │  └─ outbox 可靠投递/凭据续期         │
-                            │ core                                │
-                            │  ├─ registry：扫描 PATH 发现 agent  │
-                            │  ├─ adapter：声明式配置 → argv 执行 │
-                            │  │   + 输出解析（最终文本/session） │
-                            │  ├─ approval：权限桥 → 微信审批      │
-                            │  └─ dispatcher：chatId→(agent,      │
-                            │      sessionId) 映射 + 排队         │
-                            │ web panel（原生 HTML/JS）           │
-                            │ notify API（本地回环）← wx CLI/skill │
-                            └────────────────────────────────────┘
-                                     │ spawn 无头进程
-                     ┌───────────────┼───────────────┬─────┐
-                claude -p       codex exec        dsh    opencode/pi …
-```
+> 状态：**实验阶段**（v1 未发布，配置接口可能变动）。当前安装方式为从源码构建，尚无 npm registry 包。License: MIT
+
+## 它能做什么
+
+- **微信就是终端**：给机器人发「跑一下测试并总结失败原因」，任务在你电脑的工作目录里执行，回复回到微信，支持断点续投（网络断了不丢回复）；
+- **多 agent 并行**：`@codex 重构这个模块` 与默认 agent 同时干活，互不排队；`/agent` 切换默认，`/sessions` 绑定历史会话接着聊；
+- **权限审批在微信完成**：claude 需要更高权限时，微信收到审批请求，回复「同意」或「拒绝」即可；也可以打开本机 Web 面板处理；
+- **agent 主动找你**：agent（或任何本机脚本）用 `wx send "构建通过"` 把消息、图片推到你的微信，任务跑完不用盯着屏幕。
 
 ## 快速开始
 
-要求：Node ≥ 20，macOS / Linux（Windows best-effort）。
+### 前置要求
+
+- Node.js ≥ 20
+- macOS 或 Linux（Windows 尽力而为，未做一等公民测试）
+- 本机已安装要用的 agent CLI（如 `claude`），启动时自动扫描 PATH 发现
+
+### 安装
 
 ```bash
-# 1. 构建并全局安装（仓库根目录执行）
+git clone <仓库地址> && cd weishub
+npm install
 npm run build
 npm install -g ./packages/weishub
-# 注意：这是 workspace 链接式安装——全局 bin 符号链接回本仓库目录，
-# 安装后不可移动/删除仓库目录；正式发布后将改用 npm registry 安装（v1 尚未发布）。
-
-# 2. 启动（首次没有凭据，会先给出面板地址，浏览器打开用手机微信扫码登录）
-weishub
-# 面板地址形如 http://127.0.0.1:<port>/?token=<token>
-# 扫码确认后自动进入正式服务，再打印正式面板地址
-
-#   —— 或者用终端扫码代替面板 ——
-weishub login    # 终端展示二维码，扫码确认后退出
-weishub          # 再启动服务
 ```
 
-登录成功后，在微信里给机器人发消息即可：
+注意：这是 workspace 链接式安装，全局 `weishub` 命令指向本仓库目录——安装后不要移动/删除仓库。
 
-1. 微信发送「你好」→ hub 自动绑定第一个可用 agent 并回复；
-2. `/agents` 看可用 agent，`/agent codex` 切换，`/sessions` 绑定历史会话；
-3. agent 侧主动推送：
+### 启动
 
 ```bash
-wx send "任务完成：构建通过"
-wx send --image ./report.png
+weishub
+```
+
+预期输出（首次启动）：
+
+```
+尚未登录微信：请用手机微信扫码（先打开下方面板地址完成扫码登录）
+扫码面板：http://127.0.0.1:8090/?token=…
+```
+
+浏览器会自动打开面板，用手机微信扫码确认，之后看到：
+
+```
+扫码成功，正在启动微枢…
+微枢已启动。面板地址：http://127.0.0.1:8090/?token=…
+```
+
+### 验证
+
+微信里给机器人发「你好」→ 收到绑定成功欢迎语和 agent 回复，即跑通。
+
+再验证主动推送（另开终端）：
+
+```bash
 wx status
+# 预期输出：
+# 微信登录：已登录
+# 发件箱待发：0 条
+
+wx send "来自终端的消息"
 ```
 
-`wx` 的连接配置（`~/.weishub/token` 与 `~/.weishub/notify-port`）由 `weishub` 启动时自动写入，无需手工配置。
+`wx` 的连接配置由 `weishub` 启动时自动写入 `~/.weishub/`，无需手工配置。
 
-## 配置参考
+### 故障排查
 
-### agent 配置（agents.d 覆盖）
+| 问题 | 原因 | 解决 |
+| --- | --- | --- |
+| 启动报「另一个 weishub 实例正在运行 (pid=…)」 | 已有实例在跑 | 停掉旧实例；若确认没有，删除 `~/.weishub/hub.lock` |
+| `wx` 报「未找到 hub 令牌」 | `weishub` 没在运行 | 先启动 `weishub` |
+| `wx` 报 HTTP 401 | 全局安装的是旧版（token 接线修复前） | 在仓库重新 `npm run build && npm install -g ./packages/weishub` |
+| 启动时警告「检测到旧微信插件仍在活动」 | 旧 dsh-wechat-gateway 在抢同一长轮询通道 | 先停掉旧插件，见[迁移说明](docs/migration-dsh.md) |
+| `wx send` 报「微信通道未就绪」 | 凭据过期（约 24 小时） | 手机上给机器人发条消息即自动续期 |
+| 扫码后要求数字验证码 / 一直「登录超时」 | 服务端风控或网络异常 | 看终端报错重试；持续失败检查代理/网络 |
 
-内置 claude / codex / dsh / opencode / pi 五条声明式配置；在 `~/.weishub/agents.d/*.json` 里放同名条目可逐字段覆盖，异名条目即新增。示例（覆盖 claude 的超时与工作目录）：
+## 下一步
 
-```json
-{
-  "name": "claude",
-  "timeoutSec": 3600,
-  "workspace": "/Users/me/work/alpha"
-}
-```
-
-字段含义：
-
-| 字段 | 说明 |
-| --- | --- |
-| `name` / `detect` | 名称 / PATH 探测命令（探测不到则标记未安装，仍可 `/agents` 查看） |
-| `run` | 启动命令（argv 数组，prompt 一律经 stdin 传入） |
-| `outputFormat` | `text` / `claude-json` / `codex-jsonl` / `opencode-jsonl` / `pi-jsonl` |
-| `listSessions` | 会话存储位置（`/sessions` 列历史会话用） |
-| `resume` | 恢复会话的 argv 模板（`{{sessionId}}` 占位） |
-| `approval` | `permission-prompt-tool`（claude：需要权限时经微信询问你）/ null。⚠️ `app-server` 目前只是合法占位值，**未实现**：声明它的 agent（codex）在需要权限时不会经微信询问，auto 模式下直接按 flags 执行 |
-| `permissionFlags` | `auto` / `full` 两种权限模式各自的附加 argv |
-| `workspace` | 该 agent 默认工作目录（null = 用全局） |
-| `timeoutSec` | 单任务超时（到点杀整棵进程树） |
-
-### 工作目录
-
-- 全局默认 `~/weishub-workspace`（`weishub --workspace <目录>` 可改）；
-- 面板「工作目录」表单可实时改全局与 per-agent 覆盖，立即生效并持久化；
-- agent 回复中的本地文件路径只在当前工作目录内解析，越界路径一律不外发。
-
-### 权限模式（/permission auto|full）
-
-- `auto`（默认）：claude 走 `--permission-mode acceptEdits` + 微信审批桥——agent 需要更高权限时，微信会收到审批请求，回复「同意 / 拒绝 / 网页」即可；其余 agent 按内置 `auto` flags 执行；
-- `full`：不加审批桥，按内置 `full` flags 执行（claude 即 `--dangerously-skip-permissions`，慎用）。
-
-### 常用微信命令
-
-`/help`、`/agents`、`/agent <名字>`、`/sessions`（回复序号绑定历史会话）、`/new`、`/status`、`/stop`、`/permission [auto|full]`。
-
-## 从 dsh-wechat-gateway 迁移
-
-1. **先停掉旧 dsh-wechat-gateway 插件**：getupdates 长轮询只允许一个消费者，两个进程同时轮询会互相抢消息；
-2. 首次启动 weishub 时自动把 `~/.dsh/wechat-gateway/account.json` 校验并迁移到 `~/.weishub/account.json`，**无需重新扫码**；
-3. 若本机还留着旧插件又在跑，weishub 的数据目录锁文件（`~/.weishub/hub.lock`）只保护 weishub 自身单实例，管不住旧插件——务必先停旧的；
-4. DSH 侧后续改走 hub 的无头适配器（`dsh` 内置条目），不再常驻插件。
+- 把回复里的文件发给微信、切换工作目录、调整 agent 超时 → [配置参考](docs/config.md)
+- 用 Claude Code skill 让 agent 自动汇报 → `packages/skills/weishub-notify`（软链到 `~/.claude/skills/` 即可）
+- 从 dsh-wechat-gateway 迁移 → [迁移说明](docs/migration-dsh.md)
+- 组件与投递语义 → [架构](docs/architecture.md)
 
 ## 已知限制
 
-- **codex 配置字段未实测**：`codex exec` 输出解析与 `listSessions` 按官方格式与 fixture 编写，真实输出字段未逐一实测，遇到解析偏差请提 issue 附样本；
-- **codex 审批桥未实现**：codex 的 `approval: "app-server"` 只是合法占位配置，没有任何桥接实现——codex 在 auto 模式下按 flags 执行，需要权限时不会经微信询问（claude 的 `--permission-prompt-tool` 桥不受影响）；
-- **审批桥待真机联调**：claude `--permission-prompt-tool` 桥的单端测试齐全，端到端（真机微信回复「同意」放行工具调用）尚待真机冒烟；
-- **Windows best-effort**：凭据/锁文件的 600 权限、进程树终止等在 Windows 上尽力而为，未做一等公民测试；
-- 凭据约 24 小时有效，收信自动续期；过期后收信不受影响，仅主动推送（`wx send`）不可用。
+- **codex 配置字段未实测**：`codex exec` 输出解析按官方格式编写，遇到解析偏差请附样本反馈；
+- **codex 审批桥未实现**：codex 的 `approval: "app-server"` 只是占位配置，auto 模式下按 flags 执行，不会经微信询问（claude 桥不受影响）；
+- **claude 审批桥待真机联调**：单端测试齐全，真机「同意」放行工具调用的端到端冒烟待做；
+- 凭据约 24 小时有效，收信自动续期；过期后收信不受影响，仅 `wx send` 不可用。
 
-## Claude Code skill：微信主动推送
+## 反馈
 
-`packages/skills/weishub-notify` 是一个 Claude Code skill，教 agent 在任务完成、需要确认等时机用 `wx` CLI 给你发微信。安装：
-
-```bash
-# 复制（或软链）到 Claude Code 的 skills 目录
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/packages/skills/weishub-notify" ~/.claude/skills/weishub-notify
-```
-
-前提：`weishub serve` 在本机运行（`wx` 依赖其 notify API 与 `~/.weishub/token`）。
+项目尚未发布到远端仓库；问题与建议先记录在本地，或将日志（`weishub` 终端输出）与复现步骤整理后随仓库一起反馈给维护者。
