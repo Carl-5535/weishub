@@ -22,6 +22,7 @@ import {
   legacyCredentialPath,
   migrateLegacyCredential,
   pathExists,
+  pruneInboundMedia,
   readCredential,
   readPrivateJson,
   resolveWorkspaceFile,
@@ -57,12 +58,12 @@ import {
 } from './credential.js'
 
 export interface HubDeps {
-  client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
+  client: Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'>
   /**
    * 用新凭据重建通道 client（重新扫码后必须换掉旧的——token 在构造时固化）。
    * 不传则沿用 deps.client（测试/无登录场景）。
    */
-  createClient?: (credential: StoredCredential) => Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
+  createClient?: (credential: StoredCredential) => Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'>
   accountId: string
   ownerUserId: string
   agents: AgentConfig[]
@@ -89,6 +90,8 @@ const SEEN_CAP = 4096
 const POLL_BACKOFF_MS = 3000
 const SEND_FILE_MAX_BYTES = 100 * 1024 * 1024
 const EMPTY_RESULT_TEXT = '（任务完成，无文本输出）'
+/** 入站媒体保留期：30 天，启动时后台清理超龄文件。 */
+const INBOUND_MEDIA_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const NO_AGENTS_TEXT = '未发现可用 agent，请先安装 claude/codex 等'
 const ALLOW_WORDS = new Set(['同意', '允许', 'yes'])
 const DENY_WORDS = new Set(['拒绝', 'no'])
@@ -112,7 +115,8 @@ function classifyApprovalReply(text: string): ApprovalReply {
   const normalized = text.trim().toLowerCase()
   if (ALLOW_WORDS.has(normalized)) return 'allow'
   if (DENY_WORDS.has(normalized)) return 'deny'
-  if (text.includes('网页')) return 'web'
+  // 仅整条消息就是「网页」时才指向面板：正文包含「网页」的任务绝不能被吞
+  if (normalized === '网页') return 'web'
   return 'other'
 }
 
@@ -181,7 +185,7 @@ export class Hub {
   /** iLink 协议状态（轮询游标 + context token）：client onStateChange 喂入，随状态落盘 */
   #protocol: ILinkState | undefined
   /** 当前生效的通道 client（重新扫码后会整体换成用新 token 构造的实例） */
-  #client: Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'>
+  #client: Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'>
   /** 发件箱兜底重试定时器（stop 时清除） */
   #outboxRetryTimer: ReturnType<typeof setInterval> | undefined
   /** 最近一次收到微信消息的时间（ISO）——收信即续期，是到期推算的锚点 */
@@ -206,7 +210,7 @@ export class Hub {
       agents: deps.agents,
       run: this.#makeRun(),
       cwdFor: (agentName) => this.#cwdFor(agentName),
-      onReply: (chatId, text) => this.#onAgentReply(chatId, text),
+      onReply: (chatId, text, agentName) => this.#onAgentReply(chatId, text, agentName),
       // 任务终态（完成/失败/中止）：撤销该 chat 的挂起审批（中止/崩溃后的审批已无主，
       // 否则下一个「同意」会误决议死请求），并清掉待审批提醒
       onTaskEnd: (chatId, agentName) => {
@@ -227,6 +231,14 @@ export class Hub {
   /** notify api 端口（start 后有效；测试断言审批桥 env 注入用）。 */
   get notifyPort(): number | undefined {
     return this.#notify?.port
+  }
+
+  /**
+   * notify API 的鉴权 token（构造时确定，整个生命周期不变）。
+   * CLI 把它写入 token 文件供 wx CLI 读取——两侧必须同源，wx 才能通过认证。
+   */
+  get notifyToken(): string {
+    return this.#notifyToken
   }
 
   /** 是否已持有登录凭据（Web 面板登录态展示用）。 */
@@ -394,6 +406,8 @@ export class Hub {
    */
   async start(): Promise<void> {
     await mkdir(this.#deps.workspace, { recursive: true })
+    // 入站媒体留 30 天：后台清理，不阻塞启动、失败不影响服务
+    void pruneInboundMedia(this.#deps.workspace, INBOUND_MEDIA_RETENTION_MS).catch(() => {})
     await this.#migrateCredential()
     this.#lock = await acquireHubLock()
     try {
@@ -680,9 +694,13 @@ export class Hub {
     }
   }
 
-  /** agent 回复通道：提取文件指令与本地路径（工作区校验）后经 outbox 分块回发。 */
-  async #onAgentReply(chatId: string, text: string): Promise<void> {
-    const cwd = this.#cwdFor(this.dispatcher.binding(chatId)?.agentName ?? '')
+  /**
+   * agent 回复通道：提取文件指令与本地路径（工作区校验）后经 outbox 分块回发。
+   * agentName 是回复所属任务实际用的 agent（调度器透传）；文件按它的工作区解析，
+   * 而不是会话当前默认 agent——@提及车道与默认车道的工作区可能不同。
+   */
+  async #onAgentReply(chatId: string, text: string, agentName?: string): Promise<void> {
+    const cwd = this.#cwdFor(agentName ?? this.dispatcher.binding(chatId)?.agentName ?? '')
     const { text: cleaned, files: directiveFiles } = extractFileDirectives(text)
     const files: string[] = []
     for (const candidate of [...directiveFiles, ...detectLocalFilePaths(cleaned)]) {
@@ -850,5 +868,8 @@ export class Hub {
       if (this.#stopped) return
       await this.handleInbound(message)
     }
+    // 全部消息处理完才落盘游标（at-least-once）：中途崩溃/失败重启后从
+    // 上次 checkpoint 重放，由入站 msg.id 去重兜底，不会丢消息。
+    if (messages.length > 0 && !this.#stopped) await this.#client.checkpoint()
   }
 }

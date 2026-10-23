@@ -221,7 +221,8 @@ async function replyStatus(ctx: CommandContext): Promise<void> {
     : queued > 0
       ? `排队 ${queued}`
       : '空闲'
-  const pendingApprovals = ctx.approvals.pending().filter((a) => a.chatId === ctx.chatId).length
+  // 审批是车道作用域（chatId::agent），pendingCount 与 cancelChat 同一套归属规则
+  const pendingApprovals = ctx.approvals.pendingCount(ctx.chatId)
   await ctx.reply(
     [
       '当前状态：',

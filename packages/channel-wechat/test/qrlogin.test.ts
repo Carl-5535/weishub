@@ -1,5 +1,8 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { pollLoginSession, startLoginSession, type LoginSession } from '../src/qrlogin.js'
+import { login, pollLoginSession, startLoginSession, type LoginSession } from '../src/qrlogin.js'
 
 const API = 'https://ilinkai.weixin.qq.com'
 
@@ -77,4 +80,60 @@ describe('pollLoginSession 状态机', () => {
     const fetch = vi.fn(async () => { throw new Error('network reset') }) as unknown as typeof fetch
     expect((await pollLoginSession(session(), { fetch })).status).toBe('waiting')
   })
+})
+
+describe('pollLoginSession 错误透出', () => {
+  function session(): LoginSession {
+    return { qrcode: 'qr-1', display: 'x', apiBase: API }
+  }
+
+  it('HTTP 非 200（500/代理 HTML）不再吞成 waiting，直接抛出', async () => {
+    const fetch = vi.fn(async (): Promise<Response> => new Response('<html>gateway error</html>', { status: 502 })) as unknown as typeof fetch
+    await expect(pollLoginSession(session(), { fetch })).rejects.toThrow(/HTTP 502/)
+  })
+
+  it('响应非 JSON（HTML 错误页）直接抛出而不是静默等待', async () => {
+    const fetch = vi.fn(async (): Promise<Response> => new Response('<html>blocked</html>', { status: 200 })) as unknown as typeof fetch
+    await expect(pollLoginSession(session(), { fetch })).rejects.toThrow()
+  })
+
+  it('超时（服务端 hold）仍视为 waiting', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout')
+    timeoutError.name = 'TimeoutError'
+    const fetch = vi.fn(async (): Promise<Response> => { throw timeoutError }) as unknown as typeof fetch
+    expect((await pollLoginSession(session(), { fetch })).status).toBe('waiting')
+  })
+})
+
+describe('login 快速失败路径', () => {
+  it('服务端要求数字验证码时立即报错，不空转到超时', async () => {
+    let call = 0
+    const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const path = String(input).replace(/^https?:\/\/[^/]+/, '')
+      if (path.includes('get_bot_qrcode')) {
+        return new Response(JSON.stringify({ qrcode: 'qr-1', qrcode_img_content: 'x' }), { status: 200 })
+      }
+      call += 1
+      return new Response(JSON.stringify({ status: 'need_verifycode' }), { status: 200 })
+    }) as unknown as typeof fetch
+    await expect(login({ fetch, timeoutMs: 5_000 })).rejects.toThrow(/验证码/)
+    expect(call).toBeLessThanOrEqual(2) // 首轮即失败，不轮询到超时
+  })
+
+  it('already-bound 但本地凭据损坏时报错并指明路径，不无限循环', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'weishub-login-'))
+    const credentialPath = join(home, 'account.json')
+    await writeFile(credentialPath, 'not-json{', { mode: 0o600 })
+    let polls = 0
+    const fetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
+      const path = String(input).replace(/^https?:\/\/[^/]+/, '')
+      if (path.includes('get_bot_qrcode')) {
+        return new Response(JSON.stringify({ qrcode: 'qr-1', qrcode_img_content: 'x' }), { status: 200 })
+      }
+      polls += 1
+      return new Response(JSON.stringify({ status: 'binded_redirect' }), { status: 200 })
+    }) as unknown as typeof fetch
+    await expect(login({ fetch, credentialPath, timeoutMs: 5_000 })).rejects.toThrow(new RegExp(credentialPath.replace(/\//g, '\\/').slice(0, 20)))
+    expect(polls).toBe(1)
+  }, 10_000)
 })

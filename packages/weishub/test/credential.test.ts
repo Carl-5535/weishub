@@ -83,6 +83,15 @@ describe('isCredentialRejection', () => {
     expect(isCredentialRejection(new Error('The operation was aborted'))).toBe(false)
     expect(isCredentialRejection(new Error('微信 HTTP 500: internal'))).toBe(false)
   })
+
+  test('正文里恰好出现 401/403 数字不算凭据被拒（必须是 HTTP 状态形式）', () => {
+    expect(isCredentialRejection(new Error('网关返回了 401 条记录'))).toBe(false)
+    expect(isCredentialRejection(new Error('剩余配额 403，请求被限流'))).toBe(false)
+    expect(isCredentialRejection(new Error('端口 4013 连接失败'))).toBe(false)
+    // HTTP 状态形式仍然命中
+    expect(isCredentialRejection(new Error('HTTP 401'))).toBe(true)
+    expect(isCredentialRejection(new Error('http 403 forbidden'))).toBe(true)
+  })
 })
 
 describe('文案', () => {

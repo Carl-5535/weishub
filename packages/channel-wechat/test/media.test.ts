@@ -6,10 +6,16 @@ import {
   encryptMedia,
   extractFileDirectives,
   paddedSize,
+  pruneInboundMedia,
+  resolveWorkspaceFile,
   safeFileName,
+  saveInboundMedia,
   splitText,
 } from '../src/media.js'
 import { randomBytes } from 'node:crypto'
+import { access, mkdir, mkdtemp, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 
 describe('splitText', () => {
   it('按码点切分，不劈开代理对字符', () => {
@@ -127,5 +133,82 @@ describe('classifyOutbound', () => {
     expect(classifyOutbound('a.png')).toBe('image')
     expect(classifyOutbound('b.mp4')).toBe('video')
     expect(classifyOutbound('c.pdf')).toBe('file')
+  })
+})
+
+describe('resolveWorkspaceFile', () => {
+  it('工作区内的文件正常解析并返回内容', async () => {
+    const ws = await mkdtemp(join(tmpdir(), 'weishub-wsfile-'))
+    await mkdir(ws, { recursive: true })
+    await writeFile(join(ws, 'ok.txt'), '内容')
+    const result = await resolveWorkspaceFile(ws, 'ok.txt', 1024)
+    expect(result.name).toBe('ok.txt')
+    expect(result.bytes.toString('utf8')).toBe('内容')
+  })
+
+  it('工作区外路径被拒绝', async () => {
+    const ws = await mkdtemp(join(tmpdir(), 'weishub-wsfile-'))
+    await expect(resolveWorkspaceFile(ws, '../outside.txt', 1024)).rejects.toThrow(/工作区/)
+    await expect(resolveWorkspaceFile(ws, '/etc/passwd', 1024)).rejects.toThrow(/工作区/)
+  })
+
+  it('工作区内指向外部的符号链接被拒绝（防逃逸）', async () => {
+    const ws = await mkdtemp(join(tmpdir(), 'weishub-wsfile-'))
+    const outside = await mkdtemp(join(tmpdir(), 'weishub-outside-'))
+    const secret = join(outside, 'secret.txt')
+    await writeFile(secret, '机密')
+    await symlink(secret, join(ws, 'leak.txt'))
+    await expect(resolveWorkspaceFile(ws, 'leak.txt', 1024)).rejects.toThrow(/工作区/)
+  })
+
+  it('超过大小上限被拒绝', async () => {
+    const ws = await mkdtemp(join(tmpdir(), 'weishub-wsfile-'))
+    await writeFile(join(ws, 'big.bin'), Buffer.alloc(100))
+    await expect(resolveWorkspaceFile(ws, 'big.bin', 10)).rejects.toThrow(/限制/)
+  })
+
+  it('目录被拒绝（只发普通文件）', async () => {
+    const ws = await mkdtemp(join(tmpdir(), 'weishub-wsfile-'))
+    await mkdir(join(ws, 'sub'))
+    await expect(resolveWorkspaceFile(ws, 'sub', 1024)).rejects.toThrow(/普通文件/)
+  })
+})
+
+describe('saveInboundMedia', () => {
+  it('落盘到 16 位十六进制聊天目录，文件名安全且内容一致', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'weishub-media-'))
+    const path = await saveInboundMedia(root, 'chat-1', {
+      kind: 'image', name: '../../evil name.png', mediaType: 'image/png', data: new Uint8Array([1, 2, 3]),
+    })
+    const dir = dirname(path)
+    expect(basename(dir)).toMatch(/^[0-9a-f]{16}$/)
+    expect(basename(path)).not.toContain('..')
+    expect(await readFile(path)).toEqual(Buffer.from([1, 2, 3]))
+  })
+})
+
+describe('pruneInboundMedia', () => {
+  it('删除超龄入站媒体，保留新文件与非媒体目录', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'weishub-prune-'))
+    const chatDir = join(root, '0123456789abcdef')
+    await mkdir(chatDir, { recursive: true })
+    const oldFile = join(chatDir, '1000000000000-abcd-old.png')
+    const newFile = join(chatDir, '9999999999999-ef01-new.png')
+    await writeFile(oldFile, 'old')
+    await writeFile(newFile, 'new')
+    // 修正 mtime：oldFile 设为很久以前
+    const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
+    await utimes(oldFile, old, old)
+    // 非十六进制目录里的 agent 产物不得被碰
+    const agentDir = join(root, 'project')
+    await mkdir(agentDir, { recursive: true })
+    const agentFile = join(agentDir, 'build-output.txt')
+    await writeFile(agentFile, 'keep')
+
+    const pruned = await pruneInboundMedia(root, 30 * 24 * 60 * 60 * 1000)
+    expect(pruned).toBe(1)
+    await expect(access(oldFile)).rejects.toThrow()
+    await access(newFile) // 新文件不该被删
+    await access(agentFile) // agent 文件不该被删
   })
 })

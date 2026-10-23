@@ -1,4 +1,4 @@
-import { stat, writeFile, chmod, mkdtemp } from 'node:fs/promises'
+import { mkdir, readdir, stat, writeFile, chmod, mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -106,4 +106,21 @@ test('readCredential 对坏 savedAt 抛含字段名的中文错误', async () =>
   const target = join(workDir, 'account.json')
   await writePrivateJson(target, { ...validCredential, savedAt: '不是时间' })
   await expect(readCredential(target)).rejects.toThrow(/savedAt/)
+})
+
+test('writePrivateJson 序列化失败时清理临时文件', async () => {
+  const target = join(workDir, 'boom.json')
+  const poisonous = { get value(): number { throw new Error('boom') } }
+  await expect(writePrivateJson(target, poisonous)).rejects.toThrow('boom')
+  const leftovers = (await readdir(workDir)).filter((f) => f.endsWith('.tmp'))
+  expect(leftovers).toEqual([])
+})
+
+test('writePrivateJson rename 失败时也清理临时文件', async () => {
+  // rename 目标是目录时必然失败（EISDIR/ENOTEMPTY/EEXIST）
+  const target = join(workDir, 'adir')
+  await mkdir(target, { recursive: true })
+  await expect(writePrivateJson(target, { a: 1 })).rejects.toThrow()
+  const leftovers = (await readdir(workDir)).filter((f) => f.endsWith('.tmp'))
+  expect(leftovers).toEqual([])
 })

@@ -300,3 +300,27 @@ describe('Outbox', () => {
     }
   })
 })
+
+describe('onEmpty 回调容错', () => {
+  it('onEmpty 回调抛出不产生未处理的 promise rejection，投递循环正常收尾', async () => {
+    const sent: string[] = []
+    const outbox = new Outbox({
+      send: async (_chatId, text) => { sent.push(text) },
+      sendFile: async () => {},
+      maxChars: 100,
+      retryDelayMs: 1,
+    })
+    outbox.onEmpty(() => { throw new Error('持久化炸了') })
+    outbox.enqueue('c1', '消息')
+    await outbox.resumePending()
+    await flush()
+    expect(sent).toEqual(['消息'])
+    expect(outbox.pending()).toEqual({})
+    // 抛出回调后 outbox 仍可用：新消息照常投递、onEmpty 再次触发
+    outbox.onEmpty(() => {})
+    outbox.enqueue('c2', '再来')
+    await outbox.resumePending()
+    await flush()
+    expect(sent).toEqual(['消息', '再来'])
+  })
+})

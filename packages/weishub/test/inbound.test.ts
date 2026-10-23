@@ -236,6 +236,19 @@ test('「网页」回复不消费审批，提示可去 Web 面板处理', async 
   expect(await done).toBe('allow')
 })
 
+test('正文里包含「网页」的正常任务不被吞：照常下发给 agent', async () => {
+  const kit = makeHub()
+  const { hub, sent, calls } = kit
+  const { done } = hub.approvals.startRequest('owner-1', 'Bash', '{}')
+  await hub.handleInbound(msg({ text: '帮我抓取这个网页的内容并总结' }))
+  await settle(kit)
+  // 任务下发（带待审批提醒），而不是回复面板提示
+  expect(calls.map((c) => c.options.prompt)).toEqual(['帮我抓取这个网页的内容并总结'])
+  expect(sent.map((s) => s.text).join('\n')).toContain('待审批')
+  await hub.handleInbound(msg({ text: '同意' }))
+  expect(await done).toBe('allow')
+})
+
 test('无挂起审批、无撤销记录时，同意/拒绝词照常作为提示词下发给 agent', async () => {
   // agent 自己的追问（「要继续吗？yes」）必须能收到回答——这是常见交互，不能被审批逻辑吞掉
   const { hub, sent, calls } = makeHub()
@@ -484,6 +497,23 @@ test('agent 回复中的 send-file 指令与本地路径经 outbox files 回发'
   await settle(kit)
   // 文件外发要经工作区 realpath 校验（真实 fs 往返），直接等最终结果
   await vi.waitFor(() => expect(kit.mediaSent.map((m) => m.name).sort()).toEqual(['notes.md', 'test.txt']))
+})
+
+test('@codex 车道的回复文件按 codex 自己的工作区解析，不受默认 agent 影响', async () => {
+  // codex 专属工作区：文件只存在于这里，全局工作区没有
+  const codexWs = join(workspace, 'codex-ws')
+  await mkdir(codexWs, { recursive: true })
+  await writeFile(join(codexWs, 'codex-only.txt'), 'from codex')
+  const kit = makeHub({ allAgents: [agentClaude, agentCodex] }, async () => ({
+    text: '[[send-file:codex-only.txt]]',
+    exitCode: 0,
+  }))
+  await kit.hub.setWorkspace(undefined, { codex: codexWs })
+  // 首条消息经 @codex 路由：任务跑在 codex 车道，默认绑定是 claude
+  await kit.hub.handleInbound(msg({ text: '@codex 发文件' }))
+  await settle(kit)
+  // 回复里的文件指令必须按 codex 的工作区解析（cwd 随回复的 agent 走）
+  await vi.waitFor(() => expect(kit.mediaSent.map((m) => m.name)).toEqual(['codex-only.txt']))
 })
 
 test('claude permission-prompt-tool + auto 模式：运行时写临时 --mcp-config 并注入 env，运行后清理', async () => {

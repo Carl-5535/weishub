@@ -180,7 +180,14 @@ export class Outbox {
       }
       this.#items.delete(chatId)
       if (this.#items.size === 0) {
-        for (const cb of this.#emptyCallbacks) cb()
+        // 回调失败不能炸掉投递循环（会变成未处理 rejection 甚至终止进程）
+        for (const cb of this.#emptyCallbacks) {
+          try {
+            cb()
+          } catch {
+            // 单个回调失败不影响其余回调与后续投递
+          }
+        }
       }
       return
     }

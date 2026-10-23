@@ -72,7 +72,7 @@ export async function readPrivateJson<T>(path: string): Promise<T> {
   return value as T
 }
 
-/** 原子写入 JSON，文件权限仅本用户可读。 */
+/** 原子写入 JSON，文件权限仅本用户可读。任何失败都会清理临时文件。 */
 export async function writePrivateJson(path: string, value: unknown): Promise<void> {
   const parent = dirname(path)
   await mkdir(parent, { recursive: true, mode: 0o700 })
@@ -82,15 +82,15 @@ export async function writePrivateJson(path: string, value: unknown): Promise<vo
   try {
     await file.writeFile(`${JSON.stringify(value, null, 2)}\n`, 'utf8')
     await file.sync()
-  } finally {
     await file.close()
-  }
-  if (process.platform !== 'win32') await chmod(temporary, 0o600)
-  try {
+    if (process.platform !== 'win32') await chmod(temporary, 0o600)
     await rename(temporary, path)
   } catch (error) {
     await unlink(temporary).catch(() => undefined)
     throw error
+  } finally {
+    // close 已在 try 内成功执行过时这里是幂等的 no-op；写失败路径靠它关闭句柄
+    await file.close().catch(() => undefined)
   }
 }
 

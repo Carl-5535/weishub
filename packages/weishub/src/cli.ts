@@ -56,12 +56,13 @@ export function usage(): string {
 }
 
 /** 等待扫码阶段的占位通道原语：任何调用都以中文错误失败（该阶段不轮询、不发送）。 */
-function waitingClient(): Pick<ILinkClient, 'poll' | 'sendText' | 'sendMedia' | 'sendTyping'> {
+function waitingClient(): Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'> {
   const fail = (): never => {
     throw new Error('尚未登录微信（等待扫码中）')
   }
   return {
     poll: async (_signal: AbortSignal): Promise<InboundMessage[]> => fail(),
+    checkpoint: async (): Promise<void> => fail(),
     sendText: async (): Promise<void> => fail(),
     sendMedia: async (): Promise<void> => fail(),
     sendTyping: async (): Promise<void> => fail(),
@@ -176,8 +177,9 @@ export async function serve(
     hub = await startServe(options)
   }
 
-  // wx CLI 的连接配置：token 随机 32 字节十六进制；notify-port 取 Hub 实际监听端口
-  const token = randomBytes(32).toString('hex')
+  // wx CLI 的连接配置：token 用 hub 的 notify token（wx 与 notify API 必须同源才能过认证）；
+  // notify-port 取 Hub 实际监听端口
+  const token = hub.notifyToken
   const home = dataDir()
   await mkdir(home, { recursive: true, mode: 0o700 })
   await writeFile(join(home, 'token'), `${token}\n`, { mode: 0o600 })

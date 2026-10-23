@@ -7,7 +7,7 @@ export interface DispatcherDeps {
   run: typeof runAgentTask
   /** agent 覆盖目录 ?? 全局工作目录，由外层注入 */
   cwdFor(agentName: string): string
-  onReply(chatId: string, text: string): Promise<void>
+  onReply(chatId: string, text: string, agentName?: string): Promise<void>
   /** 任务终态钩子（成功/失败/中止都触发，队列续跑前调用）：外层据此清理该任务所属 chat 的遗留状态 */
   onTaskEnd?(chatId: string, agentName: string): void
   /** 每车道排队上限，默认 5 */
@@ -138,19 +138,25 @@ export class ChatDispatcher {
     return 'accepted'
   }
 
-  /** 中止会话的当前任务；agentName 限定单条车道。排队中的任务不受影响，按序继续。 */
+  /**
+   * 中止会话的在跑任务；agentName 限定单条车道，缺省时中止全部并行车道。
+   * 排队中的任务不受影响，按序继续。
+   */
   stop(chatId: string, agentName?: string): boolean {
     const lanes: LaneState[] = agentName !== undefined
       ? [this.lanes.get(laneKey(chatId, agentName))].filter((lane): lane is LaneState => lane !== undefined)
       : this.chatLanes(chatId)
+    const stopped: LaneState[] = []
     for (const lane of lanes) {
       if (lane.running && lane.abort !== undefined && !lane.abort.signal.aborted) {
         lane.abort.abort()
-        void this.reply(chatId, '已中止')
-        return true
+        stopped.push(lane)
       }
     }
-    return false
+    if (stopped.length === 0) return false
+    const text = stopped.length === 1 ? '已中止' : `已中止 ${stopped.length} 个任务`
+    void this.reply(chatId, text, stopped.length === 1 ? stopped[0]!.agentName : undefined)
+    return true
   }
 
   /**
@@ -225,13 +231,17 @@ export class ChatDispatcher {
       signal: lane.abort.signal,
     }
     if (lane.sessionId !== undefined) options.sessionId = lane.sessionId
+    // 写回守卫基线：仅当任务运行期间无人显式改过车道会话（/sessions、/new），结果才可写回
+    const sessionAtStart = lane.sessionId
 
     this.deps
       .run(config, options)
       .then((result: TaskResult) => {
-        // 会话写回：车道专属，天然不会跨 agent 污染
-        if (result.sessionId !== undefined) lane.sessionId = result.sessionId
-        if (result.text !== '') return this.reply(chatId, this.replyText(chatId, taskAgentName, result.text))
+        // 会话写回：车道专属，天然不会跨 agent 污染；显式改动优先于任务写回
+        if (result.sessionId !== undefined && lane.sessionId === sessionAtStart) {
+          lane.sessionId = result.sessionId
+        }
+        if (result.text !== '') return this.reply(chatId, this.replyText(chatId, taskAgentName, result.text), taskAgentName)
         return undefined
       })
       .catch((err: unknown) => {
@@ -239,7 +249,7 @@ export class ChatDispatcher {
         if (!lane.abort?.signal.aborted) {
           const message = err instanceof Error ? err.message : String(err)
           // 把「配置没配好」这类失败翻译成用户能照做的提示（未识别时保留原文）
-          return this.reply(chatId, this.replyText(chatId, taskAgentName, formatAgentFailure(taskAgentName, message)))
+          return this.reply(chatId, this.replyText(chatId, taskAgentName, formatAgentFailure(taskAgentName, message)), taskAgentName)
         }
         return undefined
       })
@@ -268,12 +278,12 @@ export class ChatDispatcher {
   }
 
   /** 回复通道：竞速一个兜底超时。onReply 永不 settle 时按时放行，队列持续推进。 */
-  private reply(chatId: string, text: string): Promise<void> {
+  private reply(chatId: string, text: string, agentName?: string): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, REPLY_TIMEOUT_MS)
     })
-    return Promise.race([this.deps.onReply(chatId, text).catch(() => {}), timeout]).finally(() => {
+    return Promise.race([this.deps.onReply(chatId, text, agentName).catch(() => {}), timeout]).finally(() => {
       if (timer !== undefined) clearTimeout(timer)
     })
   }

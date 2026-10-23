@@ -1,11 +1,13 @@
 import { execSync, spawn } from 'node:child_process'
 import { mkdtempSync, readFileSync } from 'node:fs'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { startNotifyApi, type NotifyDeps } from '@weishub/core'
-import { Outbox } from '@weishub/channel-wechat'
+import { Outbox, type ILinkClient, type InboundMessage } from '@weishub/channel-wechat'
+import { Hub, type HubDeps } from '../src/inbound.js'
+import type { AgentConfig, RunOptions, TaskResult } from '@weishub/core'
 
 const repoRoot = resolve(import.meta.dirname, '../../..')
 const scriptPath = resolve(repoRoot, 'packages/weishub/lib/wx.js')
@@ -160,3 +162,68 @@ test('无参数或未知旗标 → 用法文本 exit 1', async () => {
   expect(badFlag.code).toBe(1)
   expect(badFlag.stderr).toContain('wx send')
 })
+
+const HUB_TOKEN = 'hub-side-token'
+
+test('端到端接线：token 文件里的 hub notify token 能通过真实 notify API 认证', async () => {
+  // 独立 WEISHUB_HOME：凭据、锁、状态都落在临时目录
+  const hubHome = await mkdtemp(join(tmpdir(), 'wx-hub-home-'))
+  const prevHome = process.env.WEISHUB_HOME
+  process.env.WEISHUB_HOME = hubHome
+  try {
+    // 凭据文件（hub.start 需要）：内容合法且权限 0600
+    await writeFile(join(hubHome, 'account.json'), JSON.stringify({
+      accountId: 'bot-1', token: 'tok', apiBase: 'https://127.0.0.1:1', savedAt: new Date().toISOString(),
+    }), { mode: 0o600 })
+    await chmod(join(hubHome, 'account.json'), 0o600)
+
+    const sent: string[] = []
+    const agent: AgentConfig = {
+      name: 'claude', detect: 'claude', run: ['claude', '-p'], passVia: 'stdin',
+      outputFormat: 'claude-json', approval: null, permissionFlags: { auto: [], full: [] },
+      workspace: null, timeoutSec: 10,
+    }
+    const fail = (): never => { throw new Error('测试中不应真正轮询') }
+    const client: Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'> = {
+      poll: async (_signal: AbortSignal): Promise<InboundMessage[]> => new Promise<InboundMessage[]>(() => {}),
+      checkpoint: async () => {},
+      sendText: async (_chatId: string, text: string) => { sent.push(text) },
+      sendMedia: async () => {},
+      sendTyping: async () => {},
+    }
+    void fail
+    const deps: HubDeps = {
+      client,
+      accountId: 'bot-1',
+      ownerUserId: OWNER,
+      agents: [agent],
+      allAgents: [agent],
+      workspace: await mkdtemp(join(tmpdir(), 'wx-hub-ws-')),
+      notifyToken: HUB_TOKEN,
+      notifyPort: 0,
+    }
+    const hub = new Hub(deps)
+    await hub.start()
+    try {
+      // cli.ts 的写法：token 文件写 hub 暴露的 notify token，port 写 hub 实际端口
+      await writeFile(join(hubHome, 'token'), `${hub.notifyToken}\n`, { mode: 0o600 })
+      await writeFile(join(hubHome, 'notify-port'), `${hub.notifyPort}\n`, { mode: 0o600 })
+
+      const result = await runWx(['send', '走真实 hub'], hubHome)
+      expect(result.code).toBe(0)
+      expect(sent).toContain('走真实 hub')
+
+      // 反向：写一个不匹配的 token 就必须 401（防止测试假阳性）
+      await writeFile(join(hubHome, 'token'), 'wrong-token\n', { mode: 0o600 })
+      const bad = await runWx(['send', '不该发出'], hubHome)
+      expect(bad.code).toBe(1)
+      expect(bad.stderr).toContain('401')
+      expect(sent).not.toContain('不该发出')
+    } finally {
+      await hub.stop()
+    }
+  } finally {
+    if (prevHome === undefined) delete process.env.WEISHUB_HOME
+    else process.env.WEISHUB_HOME = prevHome
+  }
+}, 20_000)

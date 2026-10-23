@@ -80,7 +80,7 @@ export function formatRemaining(remainingMs: number): string {
  * 这不走 HTTP 状态码，因此必须从错误文案里的 errcode 识别。
  * -14 = session timeout（token 过期/被顶掉，实测最常遇到）
  */
-const CREDENTIAL_ERRCODES = new Set([-14, -1])
+const CREDENTIAL_ERRCODES = new Set([-14, -1, 401, 403])
 
 /**
  * 从通道错误里识别「凭据被服务端拒绝」。
@@ -90,8 +90,8 @@ const CREDENTIAL_ERRCODES = new Set([-14, -1])
  */
 export function isCredentialRejection(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
-  // 1) HTTP 状态码形式
-  if (/\b(401|403)\b/.test(message)) return true
+  // 1) HTTP 状态码形式（必须是显式 HTTP 上下文，裸数字会误伤普通文本里的 401/403）
+  if (/http\s*(status)?\s*[:=]?\s*40[13]\b/i.test(message)) return true
   // 2) iLink errcode 形式（服务端用 200 包着错误码返回）
   const errcode = /errcode=(-?\d+)/.exec(message)
   if (errcode !== null && CREDENTIAL_ERRCODES.has(Number(errcode[1]))) return true

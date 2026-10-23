@@ -77,6 +77,19 @@ export class ApprovalRouter {
     return [...this.#pending.values()].map((e) => ({ ...e.approval }))
   }
 
+  /**
+   * 某 chat 当前挂起的审批数（/status 展示用）。审批的 chatId 可能是车道作用域
+   * （`chatId::agent`），与 cancelChat 同一套归属规则：裸 chatId 与其所有车道都计入。
+   */
+  pendingCount(chatId: string): number {
+    let count = 0
+    for (const entry of this.#pending.values()) {
+      const approvalChatId = entry.approval.chatId
+      if (approvalChatId === chatId || approvalChatId.startsWith(chatId + '::')) count += 1
+    }
+    return count
+  }
+
   /** 查询某条审批的当前状态：挂起 pending，决议后保留决议值，未知 id 返回 undefined */
   resultOf(id: string): ApprovalDecision | 'pending' | undefined {
     if (this.#pending.has(id)) return 'pending'

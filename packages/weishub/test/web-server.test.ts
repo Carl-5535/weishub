@@ -121,7 +121,7 @@ const TOKEN = 'secret-token'
 
 
 /** 发原始 GET，返回状态码与 Location（fetch 无法覆写 Host / 观察 302 全貌）。 */
-function rawGetResponse(port: number, hostHeader: string, path: string, extraHeaders = ''): Promise<{ status: number; location?: string }> {
+function rawGetResponse(port: number, hostHeader: string, path: string, extraHeaders = ''): Promise<{ status: number; location?: string; body: string }> {
   return new Promise((resolve, reject) => {
     const socket = connect(port, '127.0.0.1', () => {
       socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\n${extraHeaders}Connection: close\r\n\r\n`)
@@ -131,7 +131,8 @@ function rawGetResponse(port: number, hostHeader: string, path: string, extraHea
     socket.on('end', () => {
       const status = Number(/^HTTP\/1\.1 (\d+)/.exec(buffer)?.[1] ?? 0)
       const location = /\r\nlocation: ([^\r\n]+)/i.exec(buffer)?.[1]
-      resolve({ status, location })
+      const body = buffer.split('\r\n\r\n').slice(1).join('\r\n\r\n')
+      resolve({ status, location, body })
     })
     socket.on('error', reject)
   })
@@ -179,8 +180,10 @@ async function putJson(url: string, path: string, body: unknown): Promise<Respon
 test('页面、静态资源、API 全部要求 token', async () => {
   const kit = makeHub()
   const { url } = await makeServer(kit.hub)
-  // 根路径无凭据时是 302（补 token），其余一律 401
-  expect((await fetch(`${url}/`, { redirect: 'manual' })).status).toBe(302)
+  // 根路径无凭据时自动补 token（302 → 跟随到达页面），其余一律 401
+  const bareRoot = await fetch(`${url}/`)
+  expect(bareRoot.status).toBe(200)
+  expect(await bareRoot.text()).toContain('app.js')
   expect((await fetch(`${url}/index.html`)).status).toBe(401)
   expect((await fetch(`${url}/app.js`)).status).toBe(401)
   expect((await fetch(`${url}/api/state`)).status).toBe(401)
@@ -191,8 +194,9 @@ test('页面、静态资源、API 全部要求 token', async () => {
   expect((await fetch(`${url}/api/state?token=${TOKEN}`)).status).toBe(200)
 })
 
-test('地址栏手输根路径（无任何凭据）重定向到带 token 的地址', async () => {
-  // 浏览器地址栏不发 Authorization 头，等价于「人手输 localhost:8090」——自动补 token
+test('地址栏手输根路径（无任何凭据）自动补 token（回环信任模型）', async () => {
+  // 面板只绑回环地址：本机访问即信任，裸根 302 补 token，用户无感知。
+  // 已知权衡：本机其他进程 curl 根路径同样能拿到 token——这是接受的模型。
   const kit = makeHub()
   const { port } = await makeServer(kit.hub)
   const res = await rawGetResponse(port, `127.0.0.1:${port}`, '/')
@@ -208,6 +212,15 @@ test('带了 Authorization 头但没 token 时不重定向（避免把 token 回
   const wrong = await rawGetResponse(port, `127.0.0.1:${port}`, '/', 'Authorization: Bearer wrong\r\n')
   expect(wrong.status).toBe(401) // 凭据错：401，绝不回写真 token
   expect(wrong.location).toBeUndefined()
+})
+
+test('带失效 token 的旧面板地址（重启轮换）同样自动补上新 token', async () => {
+  // 重启后 token 轮换，浏览器里存的旧地址刷新即拿到新 token，全程无感知
+  const kit = makeHub()
+  const { port } = await makeServer(kit.hub)
+  const stale = await rawGetResponse(port, `127.0.0.1:${port}`, `/?token=stale-token-value`)
+  expect(stale.status).toBe(302)
+  expect(stale.location).toBe(`/?token=${TOKEN}`)
 })
 
 test('/api/state 返回 snapshot、pending 审批与登录态', async () => {

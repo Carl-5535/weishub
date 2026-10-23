@@ -214,6 +214,14 @@ test('/status 汇报 agent、会话、模式、队列、待审批与发件箱', 
   expect(text).toContain('发件箱')
 })
 
+test('/status 计入车道作用域（chatId::agent）的挂起审批', async () => {
+  const { ctx, sent } = makeCtx()
+  // 生产环境审批桥创建的都是车道作用域审批
+  ctx.approvals.startRequest('owner-1::codex', 'Bash', '{}')
+  expect(await handleCommand('/status', ctx)).toBe(true)
+  expect(sent.join('\n')).toContain('待审批：1 项')
+})
+
 // ---- /stop ----
 
 test('/stop 无任务时回复当前没有运行中的任务', async () => {

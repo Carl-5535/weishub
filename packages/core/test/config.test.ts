@@ -145,6 +145,103 @@ test('非法字段抛中文错误且指明文件与字段', async () => {
   expect((err as Error).message).toContain('timeoutSec')
 })
 
+test('listSessions 形状非法（store 非字符串 / kind 不认识）抛中文错误', async () => {
+  await writeFile(
+    join(extraDir, 'badls.json'),
+    JSON.stringify({
+      name: 'badls',
+      detect: 'badls',
+      run: ['badls'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      listSessions: { store: 123, kind: 'claude' },
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const err = await loadAgentConfigs(extraDir).catch((e: unknown) => e as Error)
+  expect((err as Error).message).toContain('badls.json')
+  expect((err as Error).message).toContain('listSessions')
+})
+
+test('listSessions.kind 非法值抛中文错误', async () => {
+  await writeFile(
+    join(extraDir, 'badkind.json'),
+    JSON.stringify({
+      name: 'badkind',
+      detect: 'badkind',
+      run: ['badkind'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      listSessions: { store: '~/.x', kind: 'whatever' },
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const err = await loadAgentConfigs(extraDir).catch((e: unknown) => e as Error)
+  expect((err as Error).message).toContain('listSessions')
+})
+
+test('workspace 非字符串或 null 抛中文错误', async () => {
+  await writeFile(
+    join(extraDir, 'badws.json'),
+    JSON.stringify({
+      name: 'badws',
+      detect: 'badws',
+      run: ['badws'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      workspace: 1,
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const err = await loadAgentConfigs(extraDir).catch((e: unknown) => e as Error)
+  expect((err as Error).message).toContain('workspace')
+})
+
+test('env 非字符串键值对抛中文错误', async () => {
+  await writeFile(
+    join(extraDir, 'badenv.json'),
+    JSON.stringify({
+      name: 'badenv',
+      detect: 'badenv',
+      run: ['badenv'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      env: { KEY: 42 },
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const err = await loadAgentConfigs(extraDir).catch((e: unknown) => e as Error)
+  expect((err as Error).message).toContain('env')
+})
+
+test('resume / resumeRun 空数组抛中文错误（会导致 spawn 空命令）', async () => {
+  await writeFile(
+    join(extraDir, 'emptyresume.json'),
+    JSON.stringify({
+      name: 'emptyresume',
+      detect: 'emptyresume',
+      run: ['emptyresume'],
+      passVia: 'stdin',
+      outputFormat: 'text',
+      resume: [],
+      resumeRun: [],
+      approval: null,
+      permissionFlags: { auto: [], full: [] },
+      timeoutSec: 10,
+    }),
+  )
+  const err = await loadAgentConfigs(extraDir).catch((e: unknown) => e as Error)
+  expect((err as Error).message).toContain('resume')
+})
+
 test('resume/resumeRun 均可省略（不支持会话恢复的 agent），resumeRun 非数组时报错', async () => {
   await writeFile(
     join(extraDir, 'nores.json'),

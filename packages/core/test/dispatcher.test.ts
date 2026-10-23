@@ -76,12 +76,13 @@ function makeDeps(
   run: typeof runAgentTask,
   overrides: Partial<{
     cwdFor: (agentName: string) => string
-    onReply: (chatId: string, text: string) => Promise<void>
+    onReply: (chatId: string, text: string, agentName?: string) => Promise<void>
     onTaskEnd: (chatId: string) => void
     maxQueue: number
   }> = {},
 ) {
   const replies: Array<{ chatId: string; text: string }> = []
+  const replyAgents: Array<string | undefined> = []
   return {
     deps: {
       agents: [agentA, agentB],
@@ -89,14 +90,16 @@ function makeDeps(
       cwdFor: overrides.cwdFor ?? ((agentName: string) => `/cwd/${agentName}`),
       onReply:
         overrides.onReply ??
-        ((chatId: string, text: string) => {
+        ((chatId: string, text: string, agentName?: string) => {
           replies.push({ chatId, text })
+          replyAgents.push(agentName)
           return Promise.resolve()
         }),
       onTaskEnd: overrides.onTaskEnd,
       maxQueue: overrides.maxQueue,
     },
     replies,
+    replyAgents,
   }
 }
 
@@ -646,4 +649,111 @@ test('运行中切换 agent：结果仍返回，但 sessionId 不写到新 agent
   await vi.waitFor(() => expect(seen).toHaveLength(2))
   expect(seen[1]!.sessionId).toBeUndefined() // 切换时已重置
   await vi.waitFor(() => expect(d.binding('room-1')!.sessionId).toBe('sess-new'))
+})
+
+test('任务运行中 /sessions 显式选会话：任务结果的 sessionId 写回不得覆盖显式选择', async () => {
+  const deferredFirst = deferred()
+  const run = vi.fn((_config: AgentConfig, _options: RunOptions): Promise<TaskResult> => deferredFirst.promise)
+  const { deps } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+
+  expect(d.submit('c1', '慢任务')).toBe('accepted')
+  await drain()
+  // 任务在跑（它从 sess-start 续跑），用户显式切到 picked-by-user
+  d.setSession('c1', 'claude', 'sess-start')
+  d.setSession('c1', 'claude', 'picked-by-user')
+  deferredFirst.resolve({ text: '答', sessionId: 'sess-from-task', exitCode: 0 })
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+
+  // 用户的显式选择必须保留，而不是被任务的写回覆盖
+  expect(d.binding('c1')?.sessionId).toBe('picked-by-user')
+
+  // 下一任务携带用户选的会话，而不是任务写回的会话
+  d.submit('c1', '下一问')
+  await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2))
+  expect(run.mock.calls[1]![1].sessionId).toBe('picked-by-user')
+})
+
+test('任务运行中 /new：任务结果的 sessionId 不得复活已清空的会话', async () => {
+  const deferredFirst = deferred()
+  const run = vi.fn((_config: AgentConfig, _options: RunOptions): Promise<TaskResult> => deferredFirst.promise)
+  const { deps } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.setSession('c1', 'claude', 'sess-old')
+
+  expect(d.submit('c1', '慢任务')).toBe('accepted')
+  await drain()
+  d.clearAllSessions('c1') // /new
+  deferredFirst.resolve({ text: '答', sessionId: 'sess-continuation', exitCode: 0 })
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+
+  // /new 的「全新开始」不能被运行中任务的写回撤销
+  expect(d.binding('c1')?.sessionId).toBeUndefined()
+})
+
+test('stop 多车道并行时中止所有在跑任务并只回复一条', async () => {
+  const signals: AbortSignal[] = []
+  const run = vi.fn((_config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
+    signals.push(options.signal!)
+    return new Promise<TaskResult>((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new Error('中止')), { once: true })
+    })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  expect(d.submit('c1', 'claude 任务')).toBe('accepted')
+  expect(d.submit('c1', 'codex 任务', 'codex')).toBe('accepted') // @codex 车道并行
+  await drain()
+  expect(signals).toHaveLength(2)
+
+  expect(d.stop('c1')).toBe(true)
+  // 两条车道都被中止，而不是只有第一条
+  expect(signals.every((s) => s.aborted)).toBe(true)
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  // 单条汇总回复，而不是只有第一个车道收到「已中止」
+  expect(replies).toHaveLength(1)
+  expect(replies[0]!.text).toBe('已中止 2 个任务')
+})
+
+test('onReply 收到回复所属的 agent 名（多车道文件解析依赖）', async () => {
+  const fake = instantRun()
+  const { deps, replyAgents } = makeDeps(fake.run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'codex')
+  d.submit('c1', '问')
+  await vi.waitFor(() => expect(replyAgents.length).toBeGreaterThan(0))
+  expect(replyAgents.every((a) => a === 'codex')).toBe(true)
+})
+
+test('失败回复同样携带 agent 名', async () => {
+  const { run } = makeFakeRun(() => Promise.reject(new Error('boom')))
+  const { deps, replyAgents } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.submit('c1', '会炸的任务')
+  await vi.waitFor(() => expect(replyAgents.length).toBeGreaterThan(0))
+  expect(replyAgents.every((a) => a === 'claude')).toBe(true)
+})
+
+test('replyText：多车道会话回复带 agent 前缀，单车道保持干净', async () => {
+  // 多车道：默认 claude 车道 + codex 车道并存 → claude 的回复带前缀
+  const run = vi.fn((_config: AgentConfig, options: RunOptions): Promise<TaskResult> => {
+    void options
+    return Promise.resolve({ text: '答', exitCode: 0 })
+  })
+  const { deps, replies } = makeDeps(run)
+  const d = new ChatDispatcher(deps)
+  d.bind('c1', 'claude')
+  d.submit('c1', '单车道问')
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(replies.map((r) => r.text)).toEqual(['答']) // 单车道：无前缀
+
+  // 此时 codex 车道建立 → 两条车道 → claude 再回复应带前缀
+  d.bind('c1', 'codex')
+  d.submit('c1', 'codex 问', 'codex')
+  await vi.waitFor(() => expect(d.busy('c1')).toBe(false))
+  expect(replies.at(-1)!.text).toBe('「codex」答')
 })

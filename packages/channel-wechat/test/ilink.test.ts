@@ -69,17 +69,40 @@ describe('ILinkClient.poll', () => {
         ],
       }),
     })
-    const messages = await client({ fetch, onStateChange, state: { updatesBuffer: 'buf-1', contextTokens: {} } }).poll(AbortSignal.timeout(5_000))
+    const c = client({ fetch, onStateChange, state: { updatesBuffer: 'buf-1', contextTokens: {} } })
+    const messages = await c.poll(AbortSignal.timeout(5_000))
     expect(messages).toHaveLength(2)
     expect(messages[0]).toMatchObject({ id: '11', chatId: 'u1', userId: 'u1', group: false, text: '你好\nDSH' })
     expect(messages[1]).toMatchObject({ id: '13', chatId: 'room-9', group: true, text: '群消息' })
-    // 游标推进 + 会话 token 都触发状态回调
-    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ updatesBuffer: 'buf-2' }))
-    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ contextTokens: { 'room-9': 'ctx-room' } }))
+    // at-least-once：poll 本身不落盘新游标（消息还没被消费），只回调整会话 token
+    expect(onStateChange).not.toHaveBeenCalledWith(expect.objectContaining({ updatesBuffer: 'buf-2' }))
+    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ contextTokens: { 'room-9': 'ctx-room' }, updatesBuffer: 'buf-1' }))
     // 请求带认证头与游标
     const call = fetch.calls[0]!
     expect(call.headers.authorization).toBe('Bearer tok')
     expect(call.body.get_updates_buf).toBe('buf-1')
+    // 消费方处理完消息后 checkpoint：此时才落盘新游标
+    await c.checkpoint()
+    expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ updatesBuffer: 'buf-2', contextTokens: { 'room-9': 'ctx-room' } }))
+  })
+
+  it('消息处理中途状态落盘失败不丢消息：poll 照常返回整批', async () => {
+    const onStateChange = vi.fn(async (_state: ILinkState) => {
+      throw new Error('ENOSPC 磁盘满')
+    })
+    const fetch = mockFetch({
+      '/ilink/bot/getupdates': () => jsonResponse(200, {
+        ret: 0,
+        get_updates_buf: 'buf-2',
+        msgs: [
+          { message_id: 11, from_user_id: 'u1', context_token: 'ctx-1', item_list: [{ type: 1, text_item: { text: '第一条' } }] },
+          { message_id: 12, from_user_id: 'u1', context_token: 'ctx-2', item_list: [{ type: 1, text_item: { text: '第二条' } }] },
+        ],
+      }),
+    })
+    const messages = await client({ fetch, onStateChange }).poll(AbortSignal.timeout(5_000))
+    // 两条都已解析的消息不得因落盘失败被丢弃
+    expect(messages.map((m) => m.text)).toEqual(['第一条', '第二条'])
   })
 
   it('ret/errcode 非零时抛出带语义的错误', async () => {
@@ -100,7 +123,7 @@ describe('ILinkClient.sendText', () => {
     expect(call.body.msg.message_type).toBe(2)
   })
 
-  it('context_token 失效时自动清除并重发', async () => {
+  it('context_token 失效（errcode 41001）时自动清除并重发', async () => {
     const fetch = mockFetch({
       '/ilink/bot/sendmessage': (_call, counter) => counter.n === 1
         ? jsonResponse(200, { ret: 0, errcode: 41001, errmsg: 'context expired' })
@@ -118,6 +141,22 @@ describe('ILinkClient.sendText', () => {
     expect(sent[0]!.body.msg.context_token).toBe('stale')
     expect(sent[1]!.body.msg.context_token).toBeUndefined()
     expect(onStateChange).toHaveBeenCalledWith(expect.objectContaining({ contextTokens: {} }))
+  })
+
+  it('无关协议错误（限流等）不清除 context_token 也不盲发重试', async () => {
+    const fetch = mockFetch({
+      '/ilink/bot/sendmessage': () => jsonResponse(200, { ret: 0, errcode: -14, errmsg: '频率限制' }),
+    })
+    const onStateChange = vi.fn(async () => {})
+    await expect(new ILinkClient({
+      token: 'tok', accountId: 'b', apiBase: API, cdnBase: CDN, fetch,
+      state: { updatesBuffer: '', contextTokens: { u1: 'valid' } },
+      onStateChange,
+    }).sendText('u1', 'hi', AbortSignal.timeout(5_000))).rejects.toThrow(/sendmessage 失败/)
+    // 只发一次：不是 token 过期就不能盲目重发（会重复投递）
+    expect(fetch.calls).toHaveLength(1)
+    // 有效 token 原样保留
+    expect(onStateChange).not.toHaveBeenCalled()
   })
 })
 

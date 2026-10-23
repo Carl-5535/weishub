@@ -17,10 +17,6 @@ const TOOLS = [
       properties: {
         tool_name: { type: 'string', description: 'Claude Code 请求调用的工具名' },
         input: { type: 'object', description: '工具入参对象，原样透传给 hub 并在 allow 时回显为 updatedInput' },
-        chatId: {
-          type: 'string',
-          description: '可选，发起任务的微信 chat id；缺省回退 WEISHUB_CHAT_ID 环境变量',
-        },
       },
       required: ['tool_name', 'input'],
     },
@@ -76,10 +72,11 @@ async function dispatch(id: unknown, method: string, params: Record<string, unkn
       behaviorReply(id, { behavior: 'deny', message: `未知工具: ${name}` })
       return
     }
-    // Claude Code 传 tool_name + input 对象；chatId 由 serve 层经 WEISHUB_CHAT_ID 注入，显式传参优先
+    // Claude Code 传 tool_name + input 对象；chatId 只由 serve 层经 WEISHUB_CHAT_ID 注入。
+    // 不接受模型显式传参——投递目标是审批路由的安全边界，模型无权决定。
     const toolName = String(args?.tool_name ?? args?.toolName ?? args?.tool ?? '')
     const rawInput = args?.input
-    const chatId = String(args?.chatId ?? process.env.WEISHUB_CHAT_ID ?? '')
+    const chatId = String(process.env.WEISHUB_CHAT_ID ?? '')
     const outcome = await requestPermission({ chatId, tool: toolName, input: rawInput })
     if (outcome === 'allow') {
       behaviorReply(id, { behavior: 'allow', updatedInput: rawInput ?? {} })

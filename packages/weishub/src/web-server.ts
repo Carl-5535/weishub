@@ -119,17 +119,13 @@ export async function startWebServer(
     const authorized = req.headers.authorization === `Bearer ${deps.token}`
       || url.searchParams.get('token') === deps.token
 
-    // 唯一放行的免鉴权入口：地址栏里**完全没有任何凭据**的根路径。
-    // 浏览器地址栏不会发 Bearer 头，所以这等价于「人手输了 localhost:8090」。
-    // 注意不能因为带了 Authorization 头就重定向——那会把 token 回写给任意本地进程。
+    // 回环信任模型：面板只绑回环地址，本机访问即信任。
+    // 根路径（无论带没带 token、token 对不对）都 302 补上当前有效 token——
+    // 手输地址、重启后旧地址刷新，都无感知直达面板。
+    // 已知权衡（明确接受）：本机其他进程 curl 根路径同样能拿到 token。
     if (!authorized) {
-      // 只有裸根路径才补 token；/index.html 这类明确请求没凭据直接 401，
-      // 避免把重定向当成通用兜底。
-      const bareRoot = req.method === 'GET' && path === '/'
-        && url.searchParams.get('token') === null
-        && req.headers.authorization === undefined
+      const bareRoot = req.method === 'GET' && path === '/' && req.headers.authorization === undefined
       if (bareRoot) {
-        // 重定向补 token：<script src> 不继承查询参数，页面必须自己带上才能让子资源通过鉴权
         res.writeHead(302, { location: `/?token=${encodeURIComponent(deps.token)}` })
         res.end()
         return

@@ -71,12 +71,39 @@ export function validateAgentConfig(raw: unknown, file: string): AgentConfig {
   ) {
     errors.push(`字段 outputFormat 必须是 ${OUTPUT_FORMATS.map((f) => `"${f}"`).join(' / ')} 之一`)
   }
-  // resume/resumeRun 都是可选；提供了就必须是字符串数组
-  if (obj.resume !== undefined && !isStringArray(obj.resume)) {
-    errors.push('字段 resume 必须是字符串数组')
+  // resume/resumeRun 都是可选；提供了就必须是非空字符串数组（空数组会让 spawn 拿到空命令）
+  for (const field of ['resume', 'resumeRun'] as const) {
+    if (obj[field] !== undefined && !isStringArray(obj[field])) {
+      errors.push(`字段 ${field} 必须是字符串数组`)
+    } else if (isStringArray(obj[field]) && obj[field].length === 0) {
+      errors.push(`字段 ${field} 不能为空数组`)
+    }
   }
-  if (obj.resumeRun !== undefined && !isStringArray(obj.resumeRun)) {
-    errors.push('字段 resumeRun 必须是字符串数组')
+  // listSessions 可选；提供了就必须是 { store: 非空字符串, kind: 'claude' | 'codex' }
+  if (obj.listSessions !== undefined) {
+    const ls = obj.listSessions
+    if (typeof ls !== 'object' || ls === null || Array.isArray(ls)) {
+      errors.push('字段 listSessions 必须是对象')
+    } else {
+      const rec = ls as Record<string, unknown>
+      if (!isNonEmptyString(rec.store)) errors.push('字段 listSessions.store 必须是非空字符串')
+      if (rec.kind !== 'claude' && rec.kind !== 'codex') {
+        errors.push('字段 listSessions.kind 必须是 "claude" / "codex" 之一')
+      }
+    }
+  }
+  // workspace 可选；提供了就必须是非空字符串或 null（null = 用全局工作目录）
+  if (obj.workspace !== undefined && obj.workspace !== null && !isNonEmptyString(obj.workspace)) {
+    errors.push('字段 workspace 必须是非空字符串或 null')
+  }
+  // env 可选；提供了就必须是字符串键值对对象（值支持 {VAR} 占位）
+  if (obj.env !== undefined) {
+    const env = obj.env
+    if (typeof env !== 'object' || env === null || Array.isArray(env)) {
+      errors.push('字段 env 必须是对象')
+    } else if (!Object.values(env).every((v) => typeof v === 'string')) {
+      errors.push('字段 env 的值必须是字符串')
+    }
   }
   if (
     obj.approval !== null &&

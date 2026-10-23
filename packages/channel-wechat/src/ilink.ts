@@ -135,6 +135,17 @@ function downloadSpec(item: WireItem): DownloadSpec | undefined {
   }
 }
 
+/** 协议失败：携带 ret/errcode 供调用方区分错误类别（如 context_token 过期）。 */
+export class ILinkProtocolError extends Error {
+  constructor(readonly operation: string, readonly ret: number, readonly errcode: number, message: string) {
+    super(message)
+    this.name = 'ILinkProtocolError'
+  }
+}
+
+/** context_token 失效的协议错误码：唯一允许「清 token 重发」的类别。 */
+const ERRCODE_CONTEXT_EXPIRED = 41001
+
 export class ILinkClient {
   readonly #token: string
   readonly #accountId: string
@@ -145,7 +156,10 @@ export class ILinkClient {
   readonly #requestTimeoutMs: number
   readonly #maxMediaBytes: number
   readonly #contextTokens = new Map<string, string>()
+  /** 内存中的最新游标（poll 推进；落盘要等消费方 checkpoint，见 at-least-once 注释） */
   #updatesBuffer: string
+  /** 已落盘的游标：崩溃重启从这里重放（上游 msg.id 去重），宁可重放不可丢消息 */
+  #checkpointedBuffer: string
 
   constructor(options: ILinkClientOptions) {
     this.#token = options.token
@@ -157,22 +171,26 @@ export class ILinkClient {
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 90_000
     this.#maxMediaBytes = options.maxMediaBytes ?? 100 * 1024 * 1024
     this.#updatesBuffer = options.state?.updatesBuffer ?? ''
+    this.#checkpointedBuffer = this.#updatesBuffer
     validateApiBase(this.#apiBase)
     validateApiBase(this.#cdnBase)
     for (const [chatId, token] of Object.entries(options.state?.contextTokens ?? {})) this.#contextTokens.set(chatId, token)
   }
 
-  /** 长轮询一次，返回本轮收到的新消息（服务端无更新时会阻塞到超时）。 */
+  /**
+   * 长轮询一次，返回本轮收到的新消息（服务端无更新时会阻塞到超时）。
+   *
+   * 投递语义 at-least-once：本方法只推进内存游标、不落盘；调用方把返回的消息
+   * 全部处理完后必须调 checkpoint() 落盘。中途崩溃重启会从上次 checkpoint 重放
+   * （调用方按 msg.id 去重），而不是把已收到未处理的消息永久丢掉。
+   */
   async poll(signal: AbortSignal): Promise<InboundMessage[]> {
     const result = await this.#post<ApiResponse>('/ilink/bot/getupdates', {
-      get_updates_buf: this.#updatesBuffer,
+      get_updates_buf: this.#checkpointedBuffer,
       base_info: baseInfo(),
     }, signal)
     this.#assertSuccess(result, 'getupdates')
-    if (result.get_updates_buf !== undefined && result.get_updates_buf !== this.#updatesBuffer) {
-      this.#updatesBuffer = result.get_updates_buf
-      await this.#notifyStateChange()
-    }
+    if (result.get_updates_buf !== undefined) this.#updatesBuffer = result.get_updates_buf
     const messages: InboundMessage[] = []
     for (const message of result.msgs ?? []) {
       const userId = message.from_user_id ?? ''
@@ -189,13 +207,20 @@ export class ILinkClient {
       const group = roomId !== undefined && roomId !== ''
       const chatId = group ? roomId : userId
       // context_token 与会话绑定，回复时必须带回，失效则清除重试。
+      // token 落盘失败不阻塞消息批次（token 可从后续任意入站消息重新取得）。
       if (message.context_token !== undefined && message.context_token !== '') {
         this.#contextTokens.set(chatId, message.context_token)
-        await this.#notifyStateChange()
+        await this.#notifyStateChange().catch(() => {})
       }
       messages.push({ id: String(message.message_id ?? ''), chatId, userId, group, text, media: downloaded.media, mediaErrors: downloaded.errors })
     }
     return messages
+  }
+
+  /** 消费方确认本轮消息已处理：把内存游标（连同会话 token）落盘。 */
+  async checkpoint(): Promise<void> {
+    this.#checkpointedBuffer = this.#updatesBuffer
+    await this.#notifyStateChange()
   }
 
   /** 发送一条纯文本。 */
@@ -247,7 +272,7 @@ export class ILinkClient {
     if (uploadUrl === '') throw new Error('getuploadurl 未返回上传地址')
     this.#assertCdnOrigin(uploadUrl)
     const response = await this.#fetch(uploadUrl, {
-      method: 'POST', signal, redirect: 'error', headers: { 'content-type': 'application/octet-stream' }, body: new Uint8Array(ciphertext),
+      method: 'POST', signal: this.#cdnSignal(signal), redirect: 'error', headers: { 'content-type': 'application/octet-stream' }, body: new Uint8Array(ciphertext),
     })
     if (!response.ok) throw new Error(`微信 CDN 上传失败 HTTP ${response.status}`)
     const downloadParam = response.headers.get('x-encrypted-param')
@@ -283,10 +308,16 @@ export class ILinkClient {
     try {
       this.#assertSuccess(result, 'sendmessage')
     } catch (error) {
-      // 一次失败的 context_token 会让整条 sendmessage 被拒；丢弃后重发一次。
-      if (!this.#contextTokens.has(chatId)) throw error
+      // 仅 context_token 失效（41001）这一种失败允许「清 token 重发一次」：
+      // 其他失败（限流、内容被拒等）可能是消息已部分送达，盲发会重复投递，
+      // 删掉的有效 token 还会让后续回复无 token 可带。
+      if (
+        !(error instanceof ILinkProtocolError)
+        || error.errcode !== ERRCODE_CONTEXT_EXPIRED
+        || !this.#contextTokens.has(chatId)
+      ) throw error
       this.#contextTokens.delete(chatId)
-      await this.#notifyStateChange()
+      await this.#notifyStateChange().catch(() => {})
       await this.#sendItems(chatId, items, signal)
     }
   }
@@ -303,7 +334,7 @@ export class ILinkClient {
           || (spec.ref.encrypt_query_param === undefined ? '' : `${this.#cdnBase}/download?encrypted_query_param=${encodeURIComponent(spec.ref.encrypt_query_param)}`)
         if (url === '') throw new Error('媒体缺少下载地址')
         this.#assertCdnOrigin(url)
-        const response = await this.#fetch(url, { signal, redirect: 'error' })
+        const response = await this.#fetch(url, { signal: this.#cdnSignal(signal), redirect: 'error' })
         if (!response.ok) throw new Error(`CDN 下载失败 HTTP ${response.status}`)
         const declared = Number(response.headers.get('content-length') ?? 0)
         if (declared > this.#maxMediaBytes + 16) throw new Error(`媒体超过 ${this.#maxMediaBytes} 字节限制`)
@@ -329,8 +360,17 @@ export class ILinkClient {
     }
   }
 
+  /**
+   * CDN 直连请求的信号：在调用方信号之上叠加请求超时——挂死的 CDN 连接
+   * 不能卡死整条消息管道（API 请求在 #post 里已有同样的超时叠加）。
+   */
+  #cdnSignal(signal: AbortSignal | undefined): AbortSignal {
+    const timeout = AbortSignal.timeout(this.#requestTimeoutMs)
+    return signal === undefined ? timeout : AbortSignal.any([signal, timeout])
+  }
+
   async #notifyStateChange(): Promise<void> {
-    await this.#onStateChange?.({ updatesBuffer: this.#updatesBuffer, contextTokens: Object.fromEntries(this.#contextTokens) })
+    await this.#onStateChange?.({ updatesBuffer: this.#checkpointedBuffer, contextTokens: Object.fromEntries(this.#contextTokens) })
   }
 
   async #post<T>(path: string, payload: unknown, signal?: AbortSignal): Promise<T> {
@@ -351,15 +391,45 @@ export class ILinkClient {
       },
       body: JSON.stringify(payload),
     })
-    const responseText = await response.text()
-    if (responseText.length > MAX_RESPONSE_CHARS) throw new Error('微信响应超过 2 MiB')
+    const responseText = await cappedText(response, MAX_RESPONSE_CHARS)
     if (!response.ok) throw new Error(`微信 HTTP ${response.status}: ${responseText.slice(0, 500)}`)
     return JSON.parse(responseText) as T
   }
 
   #assertSuccess(result: ApiResponse, operation: string): void {
     if ((result.ret ?? 0) !== 0 || (result.errcode ?? 0) !== 0) {
-      throw new Error(`${operation} 失败 (ret=${result.ret ?? 0}, errcode=${result.errcode ?? 0}): ${result.errmsg ?? '未知错误'}`)
+      throw new ILinkProtocolError(
+        operation,
+        result.ret ?? 0,
+        result.errcode ?? 0,
+        `${operation} 失败 (ret=${result.ret ?? 0}, errcode=${result.errcode ?? 0}): ${result.errmsg ?? '未知错误'}`,
+      )
     }
   }
+}
+
+/** 流式读取响应体，超过 cap 字节立即中止——限制的是内存而非仅 JSON.parse 成本。 */
+async function cappedText(response: Response, capBytes: number): Promise<string> {
+  const body = response.body
+  if (body === null) return ''
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > capBytes) {
+      await reader.cancel()
+      throw new Error(`微信响应超过 ${Math.floor(capBytes / 1024 / 1024)} MiB`)
+    }
+    chunks.push(value)
+  }
+  const merged = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(merged)
 }

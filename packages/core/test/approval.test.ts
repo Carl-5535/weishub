@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { ApprovalRouter } from '../src/approval.js'
 
 test('request 挂起期间出现在 pending()，resolve allow 后兑现并清空', async () => {
@@ -73,4 +73,44 @@ test('resultOf：挂起返回 pending，决议后保留 allow/deny，未知 id �
   expect(router.resultOf(t.id)).toBe('timeout')
 
   expect(router.resultOf('no-such-id')).toBeUndefined()
+})
+
+describe('pendingCount（/status 展示用）', () => {
+  test('车道作用域（chatId::agent）的审批计入所属 chat', () => {
+    const router = new ApprovalRouter()
+    void router.request('chat-1::codex', 'Bash', 'a')
+    void router.request('chat-1::claude', 'Bash', 'b')
+    void router.request('chat-2', 'Bash', 'c')
+    expect(router.pendingCount('chat-1')).toBe(2)
+    expect(router.pendingCount('chat-2')).toBe(1)
+    expect(router.pendingCount('chat-3')).toBe(0)
+  })
+
+  test('旧式裸 chatId 与车道作用域混计时都计入', () => {
+    const router = new ApprovalRouter()
+    void router.request('chat-1', 'Bash', 'legacy')
+    void router.request('chat-1::codex', 'Bash', 'lane')
+    expect(router.pendingCount('chat-1')).toBe(2)
+  })
+
+  test('决议后不再计入', async () => {
+    const router = new ApprovalRouter()
+    const { id } = router.startRequest('chat-1::codex', 'Bash', 'a')
+    expect(router.pendingCount('chat-1')).toBe(1)
+    router.resolve(id, 'allow')
+    expect(router.pendingCount('chat-1')).toBe(0)
+  })
+})
+
+describe('cancelChat 车道作用域', () => {
+  test('agent 省略撤销该 chat 全部车道；agent 给定只撤该车道', async () => {
+    const router = new ApprovalRouter()
+    const codexReq = router.startRequest('chat-1::codex', 'Bash', 'a')
+    const claudeReq = router.startRequest('chat-1::claude', 'Bash', 'b')
+    router.cancelChat('chat-1', 'codex')
+    await expect(codexReq.done).resolves.toBe('deny')
+    expect(router.resultOf(claudeReq.id)).toBe('pending')
+    router.cancelChat('chat-1')
+    await expect(claudeReq.done).resolves.toBe('deny')
+  })
 })

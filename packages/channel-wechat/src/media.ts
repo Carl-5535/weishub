@@ -6,7 +6,7 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
-import { mkdir, open, readFile, realpath, stat } from 'node:fs/promises'
+import { mkdir, open, readdir, realpath, stat, unlink } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export type MediaKind = 'image' | 'voice' | 'file' | 'video'
@@ -107,19 +107,69 @@ export async function saveInboundMedia(root: string, chatKey: string, media: Inb
 
 /**
  * 解析 Agent 请求发送的文件，并用 realpath 证明它位于工作区内（防符号链接逃逸）。
+ * 打开文件描述符后经 fd 读取：打开之后再发生的路径替换（symlink swap）不影响读到的内容。
  */
 export async function resolveWorkspaceFile(workspace: string, requested: string, maxBytes: number): Promise<{ path: string; name: string; bytes: Buffer }> {
   const candidate = resolve(workspace, requested)
+  // 先做词法边界检查：明显在工作区外的请求不做 realpath（目标不存在时也不误报 ENOENT）
+  const lexical = relative(resolve(workspace), candidate)
+  if (lexical === '..' || lexical.startsWith(`..${sep}`) || isAbsolute(lexical)) {
+    throw new Error('出站文件必须位于配置的工作区内')
+  }
   const workspaceReal = await realpath(workspace)
   const candidateReal = await realpath(candidate)
   const inside = relative(workspaceReal, candidateReal)
   if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
     throw new Error('出站文件必须位于配置的工作区内')
   }
-  const metadata = await stat(candidateReal)
-  if (!metadata.isFile()) throw new Error('出站附件不是普通文件')
-  if (metadata.size > maxBytes) throw new Error(`出站附件超过 ${maxBytes} 字节限制`)
-  return { path: candidateReal, name: safeFileName(candidateReal, 'file.bin'), bytes: await readFile(candidateReal) }
+  // 经文件描述符 stat + 读取：fd 绑定 inode，路径中途被换成 symlink 也读不到外面
+  const file = await open(candidateReal, 'r')
+  try {
+    const metadata = await file.stat()
+    if (!metadata.isFile()) throw new Error('出站附件不是普通文件')
+    if (metadata.size > maxBytes) throw new Error(`出站附件超过 ${maxBytes} 字节限制`)
+    return { path: candidateReal, name: safeFileName(candidateReal, 'file.bin'), bytes: await file.readFile() }
+  } finally {
+    await file.close()
+  }
+}
+
+/**
+ * 清理超龄的入站媒体：只碰保存入站媒体用的 16 位十六进制聊天目录，
+ * 工作区里 agent 自己的文件一概不动。返回删除的文件数。
+ */
+export async function pruneInboundMedia(root: string, maxAgeMs: number, now = Date.now()): Promise<number> {
+  let pruned = 0
+  let entries: string[]
+  try {
+    entries = await readdir(root)
+  } catch {
+    return 0 // 根目录不存在 = 无媒体可清
+  }
+  for (const entry of entries) {
+    if (!/^[0-9a-f]{16}$/.test(entry)) continue
+    const directory = join(root, entry)
+    let files: string[]
+    try {
+      if (!(await stat(directory)).isDirectory()) continue
+      files = await readdir(directory)
+    } catch {
+      continue
+    }
+    for (const name of files) {
+      const path = join(directory, name)
+      try {
+        const metadata = await stat(path)
+        if (!metadata.isFile()) continue
+        if (now - metadata.mtimeMs <= maxAgeMs) continue
+        await unlink(path)
+        pruned += 1
+      } catch {
+        // 单个文件失败不影响其余清理
+      }
+    }
+  }
+  return pruned
 }
 
 /**

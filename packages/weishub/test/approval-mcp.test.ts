@@ -9,6 +9,8 @@ const TOKEN = 'test-token'
 
 let server: Server
 let port: number
+/** stub hub 最近一次收到的 /approvals/request body（断言 chatId 投递目标用） */
+let lastRequest: { chatId?: string; tool?: string } | undefined
 
 beforeAll(async () => {
   // 测试必须跑真实的编译产物进程，先确保 lib/approval-mcp.js 存在
@@ -22,7 +24,8 @@ beforeAll(async () => {
       let body = ''
       req.on('data', (chunk: Buffer) => (body += chunk))
       req.on('end', () => {
-        const parsed = JSON.parse(body) as { tool?: string }
+        const parsed = JSON.parse(body) as { tool?: string; chatId?: string }
+        lastRequest = parsed
         if (parsed.tool === 'boom') {
           res.writeHead(404).end()
           return
@@ -162,4 +165,13 @@ test('hub 返回 404 时 MCP 以 behavior=deny 兜底', async () => {
   const decision = JSON.parse(content[0].text) as { behavior: string; message?: string }
   expect(decision.behavior).toBe('deny')
   expect(typeof decision.message).toBe('string')
+})
+
+test('模型显式传 chatId 不生效：投递目标只由 serve 层 env 决定', async () => {
+  const env = { ...mcpEnv(), WEISHUB_CHAT_ID: 'chat-env' }
+  await callMcp(env, [
+    { id: 1, body: { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'weishub_request_permission', arguments: { tool_name: 'Bash', input: {}, chatId: 'chat-evil' } } } },
+  ])
+  // 审批必须落在 serve 层注入的 chat 上，而不是模型自己声明的 chat
+  expect(lastRequest).toMatchObject({ chatId: 'chat-env' })
 })

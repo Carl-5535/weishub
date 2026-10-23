@@ -36,6 +36,14 @@ export interface LoginOptions {
   signal?: AbortSignal
 }
 
+/** 登录协议层失败（HTTP 非 200、响应非 JSON）：与「hold 期网络抖动」严格区分，不能吞成 waiting。 */
+export class LoginProtocolError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'LoginProtocolError'
+  }
+}
+
 async function requestJson(fetch: typeof globalThis.fetch, apiBase: string, path: string, signal: AbortSignal | undefined, body?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> {
   validateApiBase(apiBase)
   const timeout = AbortSignal.timeout(timeoutMs ?? 30_000)
@@ -52,10 +60,15 @@ async function requestJson(fetch: typeof globalThis.fetch, apiBase: string, path
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
   const responseText = await response.text()
-  if (responseText.length > 2 * 1024 * 1024) throw new Error('微信登录响应超过 2 MiB')
-  if (!response.ok) throw new Error(`微信登录 HTTP ${response.status}: ${responseText.slice(0, 500)}`)
-  const value: unknown = JSON.parse(responseText)
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('微信登录返回了非对象响应')
+  if (responseText.length > 2 * 1024 * 1024) throw new LoginProtocolError('微信登录响应超过 2 MiB')
+  if (!response.ok) throw new LoginProtocolError(`微信登录 HTTP ${response.status}: ${responseText.slice(0, 500)}`)
+  let value: unknown
+  try {
+    value = JSON.parse(responseText)
+  } catch (error) {
+    throw new LoginProtocolError(`微信登录响应不是有效 JSON：${(error as Error).message}（原文：${responseText.slice(0, 120)}）`)
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new LoginProtocolError('微信登录返回了非对象响应')
   return value as Record<string, unknown>
 }
 
@@ -100,6 +113,9 @@ export async function pollLoginSession(session: LoginSession, options: Pick<Logi
     result = await requestJson(options.fetch ?? globalThis.fetch, session.apiBase, `/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(session.qrcode)}${verify}`, options.signal, undefined, STATUS_POLL_TIMEOUT_MS)
   } catch (error) {
     if (options.signal?.aborted === true) throw error
+    // 协议层失败（HTTP 500/网关 HTML/坏 JSON）必须原样抛出——吞成 waiting 会让
+    // login() 静默挂满整个超时。只有 hold 期的超时/网络抖动才视为「继续等待」。
+    if (error instanceof LoginProtocolError) throw error
     // 服务端 hold 期间的网络抖动/超时只说明「尚不知扫码状态」，视为继续等待。
     return { status: 'waiting' }
   }
@@ -146,6 +162,9 @@ export async function login(options: LoginOptions = {}): Promise<{ credentialPat
     await delay(1_000, undefined, { signal: options.signal })
     const result = await pollLoginSession(session, { fetch, signal: options.signal })
     if (result.status === 'expired') throw new Error('二维码已过期，请重新执行登录')
+    // 服务端要求手机端数字验证码：本流程没有输入通道，立即明确失败而不是空转到超时
+    if (result.status === 'needs-code') throw new Error('微信要求数字验证码：请在手机端完成验证后重试，或改用 Web 面板登录')
+    if (result.status === 'code-blocked') throw new Error('验证码已被锁定，请稍后重试或改用 Web 面板登录')
     if (result.status === 'confirmed') {
       await writePrivateJson(credentialPath, result.credential)
       return { credentialPath, credential: result.credential }
@@ -156,8 +175,9 @@ export async function login(options: LoginOptions = {}): Promise<{ credentialPat
         try {
           const credential = await readCredential(credentialPath)
           return { credentialPath, credential }
-        } catch {
-          // 凭据损坏则继续轮询等新凭据。
+        } catch (error) {
+          // 凭据损坏无法接管：服务端会一直答 already-bound，继续轮询永远无进展
+          throw new Error(`本机凭据存在但无法读取（${(error as Error).message}）。删除 ${credentialPath} 后重新扫码登录。`)
         }
       }
       continue

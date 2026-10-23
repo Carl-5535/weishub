@@ -6,7 +6,7 @@
  *   持锁进程存活时拒绝二次加锁，进程已死（或锁损坏）时接管重写。
  */
 
-import { readFile, stat, unlink } from 'node:fs/promises'
+import { open, readFile, stat, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { dataDir, defaultCredentialPath, pathExists, readCredential, writePrivateJson } from './store.js'
@@ -112,17 +112,41 @@ function processAlive(pid: number): boolean {
 /**
  * 获取 hub 单实例锁。已有锁且持锁进程存活时抛中文错误；
  * 无锁、锁损坏或持锁进程已死时写入（接管）锁并返回句柄。
+ *
+ * 创建用 O_EXCL 原子完成：两个实例同时启动时只有一个能创建成功，
+ * 不会出现「都检查时无锁、都写入、都拿锁」的 check-then-write 竞态。
  */
 export async function acquireHubLock(): Promise<HubLock> {
   const path = hubLockPath()
-  if (await pathExists(path)) {
-    const lock = await readLock(path)
-    if (lock && processAlive(lock.pid)) {
-      throw new Error(`另一个 weishub 实例正在运行 (pid=${lock.pid})`)
+  const acquire = async (): Promise<boolean> => {
+    try {
+      const file = await open(path, 'wx', 0o600)
+      try {
+        await file.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() } satisfies LockContent, null, 2)}\n`, 'utf8')
+        await file.sync()
+        return true
+      } finally {
+        await file.close()
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+      throw error
     }
-    // 无锁内容或持锁进程已死：接管重写
   }
-  await writePrivateJson(path, { pid: process.pid, startedAt: new Date().toISOString() } satisfies LockContent)
+
+  if (await acquire()) return handleFor(path)
+  // 锁文件已存在：看持锁进程是否存活
+  const lock = await readLock(path)
+  if (lock && processAlive(lock.pid)) {
+    throw new Error(`另一个 weishub 实例正在运行 (pid=${lock.pid})`)
+  }
+  // 无有效锁内容或持锁进程已死：接管重写
+  await unlink(path).catch(() => undefined)
+  if (await acquire()) return handleFor(path)
+  throw new Error('获取 hub 锁失败：锁正被其他实例并发接管，请重试')
+}
+
+function handleFor(path: string): HubLock {
   return {
     async release(): Promise<void> {
       // 锁可能已被接管重写，只有 pid 仍是自己时才删除
