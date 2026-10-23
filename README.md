@@ -24,7 +24,7 @@
 ### 安装
 
 ```bash
-git clone <仓库地址> && cd weishub
+git clone https://github.com/Carl-5535/weishub.git && cd weishub
 npm install
 npm run build
 npm install -g ./packages/weishub
@@ -94,6 +94,9 @@ wx send "来自终端的消息"
 - **claude 审批桥待真机联调**：单端测试齐全，真机「同意」放行工具调用的端到端冒烟待做；
 - 凭据约 24 小时有效，收信自动续期；过期后收信不受影响，仅 `wx send` 不可用。
 
-## 反馈
+## 反馈与贡献
 
-项目尚未发布到远端仓库；问题与建议先记录在本地，或将日志（`weishub` 终端输出）与复现步骤整理后随仓库一起反馈给维护者。
+- **Bug / 建议**：[提交 issue](https://github.com/Carl-5535/weishub/issues/new)——附上 `weishub` 终端输出与复现步骤；涉及解析问题的请附 agent 原始输出样本
+- **欢迎提 PR**：修 bug、补文档、新增 agent 内置配置都很适合；动手前建议先开个 issue 对齐方向
+- **安全问题**（凭据泄露、权限绕过等）：**请不要开公开 issue**，[发邮件](mailto:2213337499@qq.com)私下报告
+- 参与开发（环境搭建、测试、提交流程）见 [CONTRIBUTING.md](CONTRIBUTING.md)
