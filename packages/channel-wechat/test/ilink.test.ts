@@ -111,6 +111,14 @@ describe('ILinkClient.poll', () => {
     })
     await expect(client({ fetch }).poll(AbortSignal.timeout(5_000))).rejects.toThrow(/getupdates 失败.*invalid token/)
   })
+
+  it('HTTP 200 但响应体不是 JSON（网关/代理返回 HTML）时报可诊断错误而非裸 SyntaxError', async () => {
+    const fetch = mockFetch({
+      '/ilink/bot/getupdates': () => new Response('<html>502 Bad Gateway</html>', { status: 200, headers: { 'content-type': 'text/html' } }),
+    })
+    // 报错须带上下文（来源 + 响应开头），且文案不得命中「凭据被拒」的启发式
+    await expect(client({ fetch }).poll(AbortSignal.timeout(5_000))).rejects.toThrow(/不是有效 JSON.*502 Bad Gateway/)
+  })
 })
 
 describe('ILinkClient.sendText', () => {

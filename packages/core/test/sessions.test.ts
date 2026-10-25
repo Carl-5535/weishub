@@ -1,4 +1,4 @@
-import { cp, mkdtemp, rm, utimes } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, test } from 'vitest'
@@ -76,6 +76,24 @@ test('limit 截断，默认 10', async () => {
     'aaaaaaaa-1111-4000-8000-000000000002',
     'bbbbbbbb-2222-4000-8000-000000000001',
   ])
+})
+
+test('大文件只读头部取标题：首条用户行后跟超大填充行，标题照常解析', async () => {
+  const dir = join(root, 'claude', '-Users-carlchen-work-huge')
+  await mkdir(dir, { recursive: true })
+  const lines = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '大文件会话的标题' }] } }),
+    // 1 MiB 的单行填充：真实会话文件的常态（长工具输出）。全量读会拖慢 /sessions，
+    // 头部读必须照常拿到首行标题。填充行不是合法 JSON，被解析循环跳过亦无妨。
+    `{"type":"assistant","pad":"${'x'.repeat(1024 * 1024)}"}`,
+  ]
+  const file = join(dir, 'dddddddd-4444-4000-8000-000000000001.jsonl')
+  await writeFile(file, lines.join('\n'), 'utf8')
+  const t = new Date(9_000)
+  await utimes(file, t, t)
+  const sessions = await listSessions(claudeConfig(join(root, 'claude')))
+  expect(sessions[0].id).toBe('dddddddd-4444-4000-8000-000000000001')
+  expect(sessions[0].title).toBe('大文件会话的标题')
 })
 
 test('source 判定：mtime < hubSince 记 ide，否则 hub', async () => {

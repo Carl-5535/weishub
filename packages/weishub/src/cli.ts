@@ -58,7 +58,9 @@ export function usage(): string {
 /** 等待扫码阶段的占位通道原语：任何调用都以中文错误失败（该阶段不轮询、不发送）。 */
 function waitingClient(): Pick<ILinkClient, 'poll' | 'checkpoint' | 'sendText' | 'sendMedia' | 'sendTyping'> {
   const fail = (): never => {
-    throw new Error('尚未登录微信（等待扫码中）')
+    // 措辞必须避开「未登录/凭据/token」等词：这些错误会经 notify 发送路径进入
+    // isCredentialRejection 的文案启发式，命中就把「等待扫码」误标成「凭据被拒」。
+    throw new Error('微信通道尚未就绪（等待扫码确认）')
   }
   return {
     poll: async (_signal: AbortSignal): Promise<InboundMessage[]> => fail(),

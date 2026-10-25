@@ -393,7 +393,13 @@ export class ILinkClient {
     })
     const responseText = await cappedText(response, MAX_RESPONSE_CHARS)
     if (!response.ok) throw new Error(`微信 HTTP ${response.status}: ${responseText.slice(0, 500)}`)
-    return JSON.parse(responseText) as T
+    try {
+      return JSON.parse(responseText) as T
+    } catch {
+      // 网关/代理返回 HTML 等非 JSON 200 时给出可诊断的错误，而不是裸 SyntaxError
+      //（那条「Unexpected token '<'」既看不出来源，也会在轮询侧被静默吞掉）。
+      throw new Error(`微信响应不是有效 JSON（HTTP ${response.status}）：${responseText.slice(0, 120)}`)
+    }
   }
 
   #assertSuccess(result: ApiResponse, operation: string): void {

@@ -12,6 +12,7 @@
   let qrTimerStarted = false
   let qrAutoShown = false     // 本次「未登录」期间是否已自动弹过扫码框（只弹一次）
   let qrDismissed = false     // 用户主动关掉过扫码框，不再自动弹回
+  let tokenReissued = false   // 401 后已让服务端重签过一次 token（防自愈循环）
   let msgFetchSeq = 0         // 消息流请求序号：慢响应不覆盖新选中的 chat
 
   function apiUrl(path) {
@@ -20,7 +21,16 @@
 
   async function api(path, options) {
     const res = await fetch(apiUrl(path), options)
-    if (res.status === 401) throw new Error('token 无效')
+    if (res.status === 401) {
+      // 首次扫码后引导面板会换成正式 hub 的 token，旧标签页手里的旧 token 会 401。
+      // 访问裸根路径让服务端 302 重新签发当前 token，整页自愈；只试一次防循环。
+      if (!tokenReissued) {
+        tokenReissued = true
+        location.assign('/')
+        throw new Error('登录状态已过期，正在重新载入…')
+      }
+      throw new Error('token 无效')
+    }
     const body = await res.json()
     if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
     return body
@@ -445,7 +455,9 @@
 
   function renderWorkspace() {
     const per = $('ws-per')
-    if (document.activeElement && per.contains(document.activeElement)) return // 编辑中不重绘
+    const active = document.activeElement
+    // 编辑中不重绘：per-agent 输入和全局输入都算（3 秒轮询不能冲掉正在打的内容）
+    if (active && (active === $('ws-global') || per.contains(active))) return
     $('ws-global').value = state.workspace.global
     per.textContent = ''
     for (const agent of state.agents) {

@@ -404,7 +404,10 @@ export class Hub {
     }
     // 旧循环可能正卡在「凭据失效」的长退避里，且它捕获的是旧 client。
     // 这里重启循环：先中止旧的，再起一条新的（pollAbort 不能复用，重建一个）。
-    if (!this.#stopped) this.#restartLoop()
+    // 只对能换 client 的正式 hub 生效；首次扫码的引导 hub 用的是等待扫码占位
+    // client（没有 createClient），重启它的空转循环只会拿占位错误误标「凭据被拒」
+    // 并落盘（面板随后闪现「需要重新扫码」），正式 hub 随后会自行启动。
+    if (this.#deps.createClient !== undefined && !this.#stopped) this.#restartLoop()
     if (!this.#stopped) this.#startCredentialCheck()
     await this.#persistState().catch(() => undefined)
     return true
@@ -437,7 +440,10 @@ export class Hub {
       port: this.#deps.notifyPort,
     })
     if (this.#credential !== undefined) this.#startLoop()
-    await this.outbox.resumePending().catch(() => undefined)
+    // 断点续发只做后台启动：await 会把 start()（进而整个 serve，含 Web 面板）
+    // 拖在重试退避上——通道不可用时 20 条挂起就是约 2 分钟打不开面板、无法重新扫码。
+    // resumePending 对在途 chat 有 #inFlight 防重入，与 60 秒兜底定时器并发安全。
+    void this.outbox.resumePending().catch(() => undefined)
     this.#startOutboxRetry()
     if (this.#credential !== undefined) this.#startCredentialCheck()
   }
@@ -506,6 +512,7 @@ export class Hub {
    * 只吞异常不抛出——调用方决定是否退避。
    */
   async #pollRound(signal: AbortSignal): Promise<void> {
+    const wasFailed = this.#lastRoundFailed
     this.#lastRoundFailed = false
     try {
       await this.#pollOnce(signal)
@@ -518,10 +525,20 @@ export class Hub {
       this.#lastRoundFailed = true
       if (this.#stopped || signal.aborted) return
       // 鉴权失败必须让状态可见，否则只是无限退避重试、面板一直显示「已连接」
-      if (isCredentialRejection(error) && this.#credentialRejected === undefined) {
-        this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
-        await this.#persistState().catch(() => undefined)
-        process.stderr.write(`微枢：微信凭据已失效（${this.#credentialRejected}），请重新扫码\n`)
+      if (isCredentialRejection(error)) {
+        if (this.#credentialRejected === undefined) {
+          this.#credentialRejected = error instanceof Error ? error.message.slice(0, 160) : String(error).slice(0, 160)
+          await this.#persistState().catch(() => undefined)
+          process.stderr.write(`微枢：微信凭据已失效（${this.#credentialRejected}），请重新扫码\n`)
+        }
+        return
+      }
+      // 非凭据失败（网络抖动、网关 5xx、坏响应）不能完全静默——那正是
+      // 「发了没反应」的盲区；但每 3 秒一条也会刷屏，只在失败开始时记一次，
+      // 恢复后再次失败才会记下一条。
+      if (!wasFailed) {
+        const detail = error instanceof Error ? error.message : String(error)
+        process.stderr.write(`微枢：微信轮询失败，将继续重试：${detail.slice(0, 200)}\n`)
       }
     }
   }

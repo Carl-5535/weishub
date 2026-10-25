@@ -742,6 +742,59 @@ test('凭据健康：轮询遇鉴权错时标记 rejected，重新扫码后清�
   expect(kit.hub.credentialHealth.state).not.toBe('missing')
 })
 
+test('引导 hub（无 createClient）reloadCredential 不重启轮询——扫码成功瞬间不得误报「凭据被拒」', async () => {
+  // 复现首次扫码的装配：无凭据 → 等待扫码占位 client，start 不起循环
+  const kit = makeHub({ ownerUserId: '', accountId: '' })
+  await kit.hub.start()
+  expect(kit.client.poll).not.toHaveBeenCalled()
+  await writeCredential()
+  await kit.hub.reloadCredential()
+  // 修复前：reloadCredential 无条件重启循环 → 占位 client 的「尚未登录…」错误
+  // 命中 isCredentialRejection → credentialRejected 落盘、面板闪现「需要重新扫码」。
+  expect(kit.client.poll).not.toHaveBeenCalled()
+  expect(kit.hub.credentialHealth.state).toBe('ok')
+})
+
+test('start 不被发件箱续发阻塞：send 挂死（通道不可用）时 start 也立即返回', async () => {
+  await writeCredential()
+  // 持久化一条挂起投递：重启 + 通道不可用正是「面板被续发退避拖住数分钟」的场景
+  await writeFile(join(homeDir, 'state.json'), JSON.stringify({
+    outbox: { 'owner-1': { chunks: ['重启后续发的消息'], files: [], next: 0, nextFile: 0 } },
+  }), { mode: 0o600 })
+  const kit = makeHub()
+  kit.client.sendText = vi.fn((): Promise<void> => new Promise(() => {})) as typeof kit.client.sendText
+  const outcome = await Promise.race([
+    kit.hub.start().then(() => 'started'),
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), 500)),
+  ])
+  expect(outcome).toBe('started')
+})
+
+test('非凭据轮询失败要有 stderr 日志，且连续失败只记一次（不刷屏也不静默）', async () => {
+  const writes: string[] = []
+  const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+    writes.push(String(chunk))
+    return true
+  })
+  try {
+    // 无凭据：不起后台循环，tick 完全确定
+    const kit = makeHub({ ownerUserId: '', accountId: '' })
+    await kit.hub.start()
+    kit.client.poll = (async () => { throw new Error('ECONNRESET') }) as HubDeps['client']['poll']
+    await kit.hub.tick()
+    await kit.hub.tick()
+    expect(writes.filter((w) => w.includes('轮询失败'))).toHaveLength(1)
+    // 恢复后再失败，重新记一条
+    kit.client.poll = (async () => []) as HubDeps['client']['poll']
+    await kit.hub.tick()
+    kit.client.poll = (async () => { throw new Error('ECONNRESET') }) as HubDeps['client']['poll']
+    await kit.hub.tick()
+    expect(writes.filter((w) => w.includes('轮询失败'))).toHaveLength(2)
+  } finally {
+    errSpy.mockRestore()
+  }
+})
+
 test('凭据检查不消费消息、不推进游标（探活绝不能抢主循环的 getupdates）', async () => {
   await writeCredential()
   const kit = makeHub()
