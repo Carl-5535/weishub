@@ -523,7 +523,7 @@ test('claude permission-prompt-tool + auto 模式：运行时写临时 --mcp-con
   let serverConfigPath: string | undefined
   const kit = makeHub({ agents: [claudeWithApproval] }, async (_prompt, options) => {
     expect(options.approvalTool).toBeDefined()
-    expect(options.approvalTool!.toolName).toBe('weishub_request_permission')
+    expect(options.approvalTool!.toolName).toBe('mcp__weishub-approval__weishub_request_permission')
     serverConfigPath = options.approvalTool!.serverConfigPath
     const config = JSON.parse(await readFile(serverConfigPath, 'utf8')) as {
       mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>

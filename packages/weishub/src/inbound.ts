@@ -527,7 +527,10 @@ export class Hub {
     if (shouldPersistActivity) void this.#persistState().catch(() => undefined)
     // 去重先于白名单：同一条消息重复推送无论发给谁都只算一次
     if (message.id !== '') {
-      if (this.#seen.has(message.id)) return
+      if (this.#seen.has(message.id)) {
+        process.stderr.write(`微枢：跳过重复消息（id=${message.id}）\n`)
+        return
+      }
       this.#seen.add(message.id)
       while (this.#seen.size > SEEN_CAP) {
         const oldest = this.#seen.values().next().value
@@ -535,7 +538,14 @@ export class Hub {
         this.#seen.delete(oldest)
       }
     }
-    if (message.userId !== this.#deps.ownerUserId) return
+    if (message.userId !== this.#deps.ownerUserId) {
+      // 不能静默：重新扫码后 userId 可能与历史会话不一致（或陌生人/群聊消息），
+      // 静默丢弃表现为「发了没反应」，无任何线索可查。
+      process.stderr.write(
+        `微枢：忽略非 owner 消息（来自 ${message.userId}，会话 ${message.chatId}，群聊=${message.group}；owner=${this.#deps.ownerUserId}）\n`,
+      )
+      return
+    }
     const text = message.text.trim()
     if (text === '' && message.media.length === 0 && message.mediaErrors.length === 0) return
     // 消息流记录：过了去重与白名单即入环（命令/审批应答也算收到的消息）
@@ -683,7 +693,9 @@ export class Hub {
           },
         }
         await writeFile(serverConfigPath, `${JSON.stringify(serverConfig, null, 2)}\n`, { mode: 0o600 })
-        approvalTool = { serverConfigPath, toolName: 'weishub_request_permission' }
+        approvalTool = { serverConfigPath, toolName: 'mcp__weishub-approval__weishub_request_permission' }
+        // toolName 必须是全限定名：claude 对 --permission-prompt-tool 按
+        // mcp__<server>__<tool> 解析，传裸名会报 "MCP tool … not found"（真机实测）。
       }
       try {
         const result = await realRun(config, { ...options, approvalTool })
