@@ -150,6 +150,16 @@ test('缺 token 文件时输出精确提示且 exit 1', async () => {
   expect(result.stderr.trim()).toBe('未找到 hub 令牌，请先启动 weishub')
 })
 
+test('hub 不可达（连接拒绝）时输出中文错误且 exit 1', async () => {
+  const deadHome = mkdtempSync(join(tmpdir(), 'wx-dead-'))
+  // 指向保留端口 1：本机必然无人监听 → ECONNREFUSED
+  await writeFile(join(deadHome, 'token'), 'some-token\n', { mode: 0o600 })
+  await writeFile(join(deadHome, 'notify-port'), '1\n', { mode: 0o600 })
+  const result = await runWx(['status'], deadHome)
+  expect(result.code).toBe(1)
+  expect(result.stderr).toContain('无法连接 weishub（127.0.0.1:1）')
+})
+
 test('编译产物首行是 shebang（npm i -g 后 wx 可执行的前提）', async () => {
   expect(readFileSync(scriptPath, 'utf8').split('\n')[0]).toBe('#!/usr/bin/env node')
 })

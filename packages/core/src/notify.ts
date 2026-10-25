@@ -6,7 +6,12 @@ import type { ApprovalRouter, ApprovalDecision } from './approval.js'
 
 export interface NotifyDeps {
   token: string
-  ownerChatId: string
+  /**
+   * owner 会话 id。owner-only 模型下可能被「首条私聊认主」改写（认领 id ≠ 凭据
+   * userId），所以支持传取值函数，兜底入队在发送时刻取最新值，避免把消息
+   * 发进已失效的旧代际会话。
+   */
+  ownerChatId: string | (() => string)
   /** 发送文本（未登录/通道失效时抛错） */
   sendText(text: string): Promise<void>
   /** 发送图片（未登录/通道失效时抛错） */
@@ -14,6 +19,12 @@ export interface NotifyDeps {
   outbox: Outbox
   /** 审批路由：提供后挂载 /approvals/* 路由（approval-mcp 桥依赖） */
   approvals?: ApprovalRouter
+  /**
+   * 新审批挂起时回调（lane 作用域 chatId，形如 `<会话>::<agent>`）。
+   * hub 用它把审批请求推送到微信——审批桥自身只登记与轮询，不推送，
+   * 缺了它用户在微信侧收不到任何提示，claude 会静默挂到超时。
+   */
+  onApprovalRequest?: (chatId: string, tool: string, input: string) => void
   /** 可选状态探针：/status 的 loggedIn 与 credentialExpiresHint */
   getLoggedIn?: () => boolean
   getCredentialHint?: () => string | undefined
@@ -21,6 +32,10 @@ export interface NotifyDeps {
 
 /** body 上限：主要给图片 base64 留余量 */
 export const DEFAULT_MAX_BODY_BYTES = 100 * 1024 * 1024
+
+function resolveOwnerChatId(deps: NotifyDeps): string {
+  return typeof deps.ownerChatId === 'function' ? deps.ownerChatId() : deps.ownerChatId
+}
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' }
 
@@ -102,7 +117,7 @@ export async function startNotifyApi(
         return send(res, 200, { ok: true })
       } catch {
         // 通道未就绪：内容保留进发件箱，绝不丢失（Review Focus #3）
-        deps.outbox.enqueue(deps.ownerChatId, body.text)
+        deps.outbox.enqueue(resolveOwnerChatId(deps), body.text)
         return send(res, 503, { error: '微信通道未就绪' })
       }
     }
@@ -144,6 +159,12 @@ export async function startNotifyApi(
       }
       // 立即答 id，不长挂——审批桥拿到 id 后轮询 /approvals/result/:id
       const { id } = deps.approvals.startRequest(body.chatId, body.tool, JSON.stringify(input))
+      // 推送审批请求到微信（失败不影响登记：面板仍可见，桥照常轮询）
+      try {
+        deps.onApprovalRequest?.(body.chatId, body.tool, JSON.stringify(input))
+      } catch {
+        // 通知失败只影响时效，不影响审批本身
+      }
       return send(res, 200, { id })
     }
 

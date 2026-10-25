@@ -18,6 +18,7 @@ import { join } from 'node:path'
 import QRCode from 'qrcode'
 import {
   defaultCredentialPath,
+  LoginProtocolError,
   pollLoginSession,
   startLoginSession,
   writePrivateJson,
@@ -65,14 +66,18 @@ async function readJson(req: IncomingMessage, cap: number): Promise<Record<strin
   }
   const chunks: Buffer[] = []
   let size = 0
+  let tooLarge = false
   for await (const chunk of req) {
     size += (chunk as Buffer).length
     if (size > cap) {
-      req.destroy()
-      return 'too-large'
+      // 不能直接 destroy：会连响应一起掐断，客户端只看到 ECONNRESET 而不是 413。
+      // 丢弃后续数据、继续读完，让调用方照常应答（自身流量有 cap 兜底）。
+      tooLarge = true
+      continue
     }
     chunks.push(chunk as Buffer)
   }
+  if (tooLarge) return 'too-large'
   try {
     const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || 'null')
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
@@ -198,7 +203,12 @@ export async function startWebServer(
       let result: Awaited<ReturnType<typeof pollLoginSession>>
       try {
         result = await pollLoginSession(loginSession, { fetch: fetchImpl })
-      } catch {
+      } catch (error) {
+        // 协议层失败（HTTP 5xx/网关 HTML/坏 JSON）必须报错而不是吞成 waiting：
+        // qrlogin.ts 特意区分两者，吞掉会让面板在故障下永远显示「等待扫码」。
+        if (error instanceof LoginProtocolError) {
+          return send(res, 200, { status: 'error', error: error.message })
+        }
         return send(res, 200, { status: 'waiting' })
       }
       if (result.status === 'confirmed') {
@@ -227,7 +237,7 @@ export async function startWebServer(
         media: [],
         mediaErrors: [],
       }
-      await hub.handleInbound(message)
+      await hub.handleInbound(message, 'panel')
       return send(res, 200, { ok: true })
     }
 
@@ -245,7 +255,7 @@ export async function startWebServer(
       if (decision !== 'allow' && decision !== 'deny') return send(res, 400, { error: "decision 必须是 'allow' 或 'deny'" })
       const id = decodeURIComponent(approvalMatch[1]!)
       if (hub.approvals.resultOf(id) === undefined) return send(res, 404, { error: '未知审批' })
-      hub.approvals.resolve(id, decision)
+      hub.resolveApproval(id, decision)
       return send(res, 200, { ok: true })
     }
 
@@ -340,6 +350,9 @@ export async function startWebServer(
       resolve({
         port,
         close: () => new Promise<void>((res, rej) => {
+          // 浏览器标签页的 keep-alive 连接会让 close() 拖到 keepAliveTimeout（默认 5s），
+          // 关机路径排在 hub.stop() 之前——先掐空闲连接，状态落盘不被面板拖住
+          server.closeIdleConnections?.()
           server.close((err) => (err === undefined ? res() : rej(err)))
         }),
       })

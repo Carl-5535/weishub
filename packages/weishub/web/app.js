@@ -201,8 +201,9 @@
   async function pollQr() {
     if (!qrActive || !state) return
     // 已正常登录就不必再轮询；rejected/expired 时 loggedIn 仍为 true，必须继续轮询
+    //（expired 漏掉的话，凭据过期后面板点「重新扫码」永远等不到确认回调）
     const health = state.credential?.state
-    if (health !== undefined && health !== 'missing' && health !== 'rejected') return
+    if (health !== undefined && health !== 'missing' && health !== 'rejected' && health !== 'expired') return
     let r
     try {
       r = await api('/api/qr/poll')
@@ -221,6 +222,13 @@
     } else if (r.status === 'needs-code' || r.status === 'code-blocked') {
       qrActive = false
       $('qr-status').textContent = '需要数字验证码，请改用命令行 weishub login'
+    } else if (r.status === 'already-bound') {
+      // 扫码的微信已绑定本机既有凭据：服务端已丢弃本次会话，必须换码重扫
+      qrActive = false
+      $('qr-img').hidden = true
+      $('qr-status').textContent = '该微信已绑定本机凭据，点「换个二维码」重试；若仍如此，删除 ~/.weishub/account.json 后重启'
+    } else if (r.status === 'error') {
+      $('qr-status').textContent = '登录服务异常：' + (r.error || '未知错误')
     }
   }
 
@@ -376,6 +384,9 @@
     if (list.dataset.chat !== chat.chatId) {
       list.dataset.chat = chat.chatId
       list.textContent = ''
+      // 换会话必须清签名：两个内容相同的会话（典型是两个空会话）会让
+      // 「无变化不重绘」误判，新会话渲染成一片空白
+      delete list.dataset.signature
     }
     void loadMessages(chat.chatId)
   }

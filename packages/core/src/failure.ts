@@ -20,7 +20,9 @@ export interface AgentFailureHint {
 const PATTERNS: { test: RegExp; hint: (m: RegExpMatchArray) => AgentFailureHint }[] = [
   {
     // codex: ~/.codex/config.toml 损坏 / 引用了不存在的文件（实测报 "Error: No such file or directory"）
-    test: /Error loading config\.toml|config\.toml/i,
+    // 只认明确上下文：裸 config.toml 会把任务输出里恰好提到该文件名的错误（如
+    // ENOENT /proj/config.toml.bak）误判成「codex 配置有问题」。
+    test: /Error loading config\.toml|config\.toml[^\n]*(No such file or directory|not found|invalid|损坏|无法)/i,
     hint: () => ({
       summary: 'codex 的配置文件（~/.codex/config.toml）有问题',
       action: '修复或重命名该文件后重试（0.163 已移除 wire_api="chat"，旧配置需要更新）',

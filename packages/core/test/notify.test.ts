@@ -234,3 +234,64 @@ describe('超时经 API 可查', () => {
     }
   })
 })
+
+describe('审批请求推送与 owner 取值', () => {
+  test('onApprovalRequest 在登记成功后收到 lane 作用域 chatId/tool/input', async () => {
+    const requests: Array<{ chatId: string; tool: string; input: string }> = []
+    const s = await start({
+      onApprovalRequest: (chatId, tool, input) => { requests.push({ chatId, tool, input }) },
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.port}/approvals/request`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId: 'c1::claude', tool: 'Write', input: { file_path: '/tmp/x' } }),
+      })
+      expect(res.status).toBe(200)
+      const { id } = await res.json() as { id: string }
+      expect(s.approvals.resultOf(id)).toBe('pending')
+      expect(requests).toEqual([{ chatId: 'c1::claude', tool: 'Write', input: '{"file_path":"/tmp/x"}' }])
+    } finally {
+      await s.close()
+    }
+  })
+
+  test('onApprovalRequest 抛错不影响登记与应答', async () => {
+    const s = await start({
+      onApprovalRequest: () => { throw new Error('推送失败') },
+    })
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.port}/approvals/request`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ chatId: OWNER, tool: 'Bash', input: {} }),
+      })
+      expect(res.status).toBe(200)
+    } finally {
+      await s.close()
+    }
+  })
+
+  test('ownerChatId 支持取值函数：通道失效兜底入队用发送时刻的最新值', async () => {
+    let owner = 'old-generation-id'
+    const s = await start({
+      ownerChatId: () => owner,
+      sendText: async () => { throw new Error('未登录') },
+    })
+    try {
+      // 认主发生在 hub 构造之后：发送时刻应取到新代际 id
+      owner = 'new-generation-id'
+      const res = await fetch(`http://127.0.0.1:${s.port}/notify`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ text: '认主后的推送' }),
+      })
+      expect(res.status).toBe(503)
+      await flush()
+      expect(s.outbox.pending()['new-generation-id']).toBeDefined()
+      expect(s.outbox.pending()['old-generation-id']).toBeUndefined()
+    } finally {
+      await s.close()
+    }
+  })
+})

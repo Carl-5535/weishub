@@ -76,6 +76,8 @@ describe('isCredentialRejection', () => {
   test('其他 errcode 不算凭据问题', () => {
     expect(isCredentialRejection(new Error('sendmessage 失败 (ret=0, errcode=-2): invalid param'))).toBe(false)
     expect(isCredentialRejection(new Error('getupdates 失败 (ret=0, errcode=-500): system busy'))).toBe(false)
+    // -1 是微信系 API 通用的「系统繁忙」：误判成凭据被拒会把轮询打进 10 分钟长退避
+    expect(isCredentialRejection(new Error('getupdates 失败 (ret=0, errcode=-1): system busy'))).toBe(false)
   })
 
   test('网络类错误不算凭据被拒', () => {

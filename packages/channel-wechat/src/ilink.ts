@@ -190,7 +190,13 @@ export class ILinkClient {
       base_info: baseInfo(),
     }, signal)
     this.#assertSuccess(result, 'getupdates')
-    if (result.get_updates_buf !== undefined) this.#updatesBuffer = result.get_updates_buf
+    if (result.get_updates_buf !== undefined) {
+      this.#updatesBuffer = result.get_updates_buf
+    } else if ((result.msgs ?? []).length > 0) {
+      // 服务端没推进游标：checkpoint 会把旧游标再落盘，下一轮原批重放（去重兜底
+      // 但媒体反复下载、空转不止）。必须可见，否则表现为莫名其妙的重复处理。
+      process.stderr.write('微枢通道：getupdates 返回了消息但没有新游标（get_updates_buf 缺失），本轮不做 checkpoint\n')
+    }
     const messages: InboundMessage[] = []
     for (const message of result.msgs ?? []) {
       const userId = message.from_user_id ?? ''

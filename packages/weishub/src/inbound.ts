@@ -206,11 +206,14 @@ export class Hub {
     this.#client = deps.client
     this.#notifyToken = deps.notifyToken ?? randomBytes(24).toString('hex')
     this.approvals = new ApprovalRouter()
+    // 发送闭包读 this.#client 而不是 deps.client：重新扫码会热换 client
+    //（token 在构造时固化），发件箱续发必须始终走当前 client，否则换绑后
+    // 投递会对着旧 token 无限重试、用户收不到任何回复。
     this.outbox = new Outbox({
-      send: (chatId, text) => deps.client.sendText(chatId, text),
+      send: (chatId, text) => this.#client.sendText(chatId, text),
       sendFile: async (chatId, path) => {
         const bytes = await readFile(path)
-        await deps.client.sendMedia(chatId, basename(path), new Uint8Array(bytes))
+        await this.#client.sendMedia(chatId, basename(path), new Uint8Array(bytes))
       },
       maxChars: deps.maxReplyChars ?? 2000,
     })
@@ -239,6 +242,31 @@ export class Hub {
   /** notify api 端口（start 后有效；测试断言审批桥 env 注入用）。 */
   get notifyPort(): number | undefined {
     return this.#notify?.port
+  }
+
+  /** 当前协议游标（轮询 buffer + 会话 token）。重新扫码换 client 时必须带上最新值。 */
+  get protocolState(): ILinkState | undefined {
+    return this.#protocol
+  }
+
+  /**
+   * 决议一条审批（微信回复与 Web 面板共用）：决议后若该会话已无挂起审批，
+   * 清掉待审批提醒——否则下一条回复会带着过期的「有 N 项待审批」尾巴，
+   * 用户照做回复「同意」反而被当成任务发给 agent。
+   */
+  resolveApproval(id: string, decision: 'allow' | 'deny'): void {
+    const approval = this.approvals.pending().find((a) => a.id === id)
+    this.approvals.resolve(id, decision)
+    if (approval !== undefined) this.#syncReminder(approval.chatId.split('::')[0]!)
+  }
+
+  /** 会话的挂起审批数变了就同步提醒：0 条清除，>0 条记录条数。 */
+  #syncReminder(chat: string): void {
+    const remaining = this.approvals.pending().filter(
+      (a) => a.chatId === chat || a.chatId.startsWith(chat + '::'),
+    ).length
+    if (remaining === 0) this.#reminders.delete(chat)
+    else this.#reminders.set(chat, remaining)
   }
 
   /**
@@ -431,11 +459,24 @@ export class Hub {
     await this.#loadState()
     this.#notify = await startNotifyApi({
       token: this.#notifyToken,
-      ownerChatId: this.#deps.ownerUserId,
+      ownerChatId: () => this.ownerUserId,
       sendText: (text) => this.#sendOutbound(() => this.#client.sendText(this.ownerUserId, text)),
       sendImage: (name, bytes) => this.#sendOutbound(() => this.#client.sendMedia(this.ownerUserId, name, bytes)),
       outbox: this.outbox,
       approvals: this.approvals,
+      onApprovalRequest: (laneChatId, tool, input) => {
+        // 审批桥只登记与轮询，不推送：没有这条微信收不到任何提示，claude 会
+        // 静默挂到超时。lane 作用域 chatId（`<会话>::<agent>`）剥回会话投递。
+        const chat = laneChatId.split('::')[0]!
+        const agent = laneChatId.split('::')[1] ?? ''
+        let inputView = input
+        try {
+          inputView = JSON.stringify(JSON.parse(input))
+        } catch {
+          // 原样展示
+        }
+        void this.#reply(chat, `「${agent}」请求权限：${tool}\n${inputView.slice(0, 300)}\n回复「同意」或「拒绝」处理；回复「网页」在 Web 面板处理。`)
+      },
       getLoggedIn: () => this.#credential !== undefined,
       port: this.#deps.notifyPort,
     })
@@ -543,15 +584,21 @@ export class Hub {
     }
   }
 
-  /** 轮询循环每条消息的入口。 */
-  async handleInbound(message: InboundMessage): Promise<void> {
+  /**
+   * 轮询循环每条消息的入口。source 标记来源：面板「手动插话」注入的消息走
+   * 同一条管线，但它们不经过微信服务端，不能作为「凭据仍被接受」的证据
+   * （否则凭据真失效时，一条面板消息会把 rejected 状态清掉长达一个退避周期）。
+   */
+  async handleInbound(message: InboundMessage, source: 'channel' | 'panel' = 'channel'): Promise<void> {
     // 收到微信消息 = 服务端已经接受了当前凭据，顺带续期（这也是过期推算的锚点）
-    const activityAt = new Date().toISOString()
-    const shouldPersistActivity = this.#lastActivityAt === undefined
-      || Date.parse(activityAt) - Date.parse(this.#lastActivityAt) > 60_000
-    this.#lastActivityAt = activityAt
-    this.#credentialRejected = undefined
-    if (shouldPersistActivity) void this.#persistState().catch(() => undefined)
+    if (source === 'channel') {
+      const activityAt = new Date().toISOString()
+      const shouldPersistActivity = this.#lastActivityAt === undefined
+        || Date.parse(activityAt) - Date.parse(this.#lastActivityAt) > 60_000
+      this.#lastActivityAt = activityAt
+      this.#credentialRejected = undefined
+      if (shouldPersistActivity) void this.#persistState().catch(() => undefined)
+    }
     // 去重先于白名单：同一条消息重复推送无论发给谁都只算一次
     if (message.id !== '') {
       if (this.#seen.has(message.id)) {
@@ -603,6 +650,7 @@ export class Hub {
         const oldest = pendings.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b))
         this.approvals.resolve(oldest.id, verdict)
         await this.#reply(message.chatId, verdict === 'allow' ? '已允许' : '已拒绝')
+        this.#syncReminder(message.chatId)
         return
       }
       if (verdict === 'web') {
@@ -651,15 +699,22 @@ export class Hub {
     }
     prompt += attachments.join('')
 
-    if (this.dispatcher.binding(message.chatId) === undefined) {
+    // 绑定不存在，或绑定指向的 agent 已卸载（重启后发现被移除）都视为未绑定：
+    // 后者若放行，dispatcher.submit 会以 rejected-unbound 静默拒绝（无回复无日志，
+    // 表现为「发了没反应」）。重新绑到当前启用的 agent 并告知。
+    const existingBinding = this.dispatcher.binding(message.chatId)
+    if (existingBinding === undefined || !this.#deps.agents.some((a) => a.name === existingBinding.agentName)) {
       if (this.#deps.agents.length === 0) {
         await this.#reply(message.chatId, NO_AGENTS_TEXT)
         return
       }
       const enabled = this.enabledAgent ?? this.#deps.agents[0]!.name
+      const rebindReason = existingBinding !== undefined
+        ? `原绑定的 agent「${existingBinding.agentName}」已不可用，已改绑`
+        : '已绑定'
       this.dispatcher.bind(message.chatId, enabled)
       await this.#persistState()
-      await this.#reply(message.chatId, `已绑定 agent「${enabled}」，直接发消息即可开始。`)
+      await this.#reply(message.chatId, `${rebindReason} agent「${enabled}」，直接发消息即可开始。`)
     }
 
     // @提及路由：@<agent> 任务 → 交给对应 agent 的车道（可与默认 agent 并行）
@@ -825,7 +880,14 @@ export class Hub {
       for (const [chatId, mode] of Object.entries(state.modes ?? {})) {
         if (mode === 'auto' || mode === 'full') this.dispatcher.setMode(chatId, mode as PermissionMode)
       }
-      if (state.outbox !== undefined) this.outbox.load(state.outbox)
+      if (state.outbox !== undefined) {
+        try {
+          this.outbox.load(state.outbox)
+        } catch (error) {
+          // 单条坏断点不能拖垮整个状态恢复（否则游标/认领/启用 agent 全部回退）
+          process.stderr.write(`微枢：发件箱断点损坏已略过（${(error as Error).message.slice(0, 160)}）\n`)
+        }
+      }
       // 协议状态：保留到内存，保证后续持久化不丢游标（client 侧的恢复由 serve 在构造时完成）
       this.#protocol = normalizeProtocol(state.protocol)
       // 唯一启用的 agent：只在仍可用时采用，否则由 getter 退回第一个已发现项
@@ -913,6 +975,9 @@ export class Hub {
   #restartLoop(): void {
     this.#pollAbort.abort()
     this.#pollAbort = new AbortController()
+    // 旧循环被 abort 的那轮会把 lastRoundFailed 置 true；不清掉的话新循环
+    // 首个非凭据失败不会记日志（该日志只在失败开始时记一条）
+    this.#lastRoundFailed = false
     this.#startLoop()
   }
 

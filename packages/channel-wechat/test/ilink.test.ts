@@ -121,6 +121,54 @@ describe('ILinkClient.poll', () => {
   })
 })
 
+describe('ILinkClient 媒体下载失败路径', () => {
+  // 带一张可下载图片的消息批次（aeskey 走 hex 形态）
+  const imageMessage = (media: Record<string, unknown>, aeskey?: string) => ({
+    ret: 0,
+    get_updates_buf: 'buf-2',
+    msgs: [
+      {
+        message_id: 21,
+        from_user_id: 'u1',
+        context_token: 'ctx-1',
+        item_list: [{ type: 2, image_item: { ...(aeskey !== undefined ? { aeskey } : {}), media } }],
+      },
+    ],
+  })
+
+  it('缺少 AES 密钥：进 mediaErrors 不抛出、不中断批次', async () => {
+    const fetch = mockFetch({
+      '/ilink/bot/getupdates': () => jsonResponse(200, imageMessage({ encrypt_query_param: 'dl-1' })),
+    })
+    const messages = await client({ fetch }).poll(AbortSignal.timeout(5_000))
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.media).toHaveLength(0)
+    expect(messages[0]!.mediaErrors[0]).toContain('媒体缺少 AES 密钥')
+  })
+
+  it('CDN 非 200：报带状态码的错误且不中断批次', async () => {
+    const fetch = mockFetch({
+      '/ilink/bot/getupdates': () => jsonResponse(200, imageMessage({ encrypt_query_param: 'dl-2' }, 'aabbccdd')),
+      // cdnBase 含 /c2c 前缀：实际下载 URL 是 <cdn>/download?encrypted_query_param=…
+      '/c2c/download': () => new Response('gone', { status: 404 }),
+    })
+    const messages = await client({ fetch }).poll(AbortSignal.timeout(5_000))
+    expect(messages[0]!.media).toHaveLength(0)
+    expect(messages[0]!.mediaErrors[0]).toContain('CDN 下载失败 HTTP 404')
+  })
+
+  it('服务端给的非 CDN 源地址（full_url 指向别处）：拒绝下载（防重定向外泄）', async () => {
+    const fetch = mockFetch({
+      '/ilink/bot/getupdates': () => jsonResponse(200, imageMessage({ full_url: 'https://evil.example.com/dl?x=1' }, 'aabbccdd')),
+    })
+    const messages = await client({ fetch }).poll(AbortSignal.timeout(5_000))
+    expect(messages[0]!.media).toHaveLength(0)
+    expect(messages[0]!.mediaErrors[0]).toContain('不在配置的 CDN 源内')
+    // 不应向外源发起任何请求
+    expect(fetch.calls.some((c) => c.url.includes('evil.example.com'))).toBe(false)
+  })
+})
+
 describe('ILinkClient.sendText', () => {
   it('发送正确的消息体', async () => {
     const fetch = mockFetch({ '/ilink/bot/sendmessage': () => jsonResponse(200, { ret: 0 }) })

@@ -47,7 +47,10 @@ export async function startServe(options: ServeOptions = {}): Promise<Hub> {
     token: cred.token,
     accountId: cred.accountId,
     apiBase: cred.apiBase,
-    state: persistedProtocol,
+    // 重新扫码时必须带 hub 的最新游标：进程启动时读的 persistedProtocol 是旧
+    // 快照，用它构造的新 client 会让服务端重放自启动以来的全部消息（超过去重
+    // 容量后真会重复执行任务）。hub 未建好时（首次启动）才退回磁盘快照。
+    state: hubRef?.protocolState ?? persistedProtocol,
     onStateChange: (state) => hubRef?.recordProtocolState(state),
   })
   const client = makeClient(credential)

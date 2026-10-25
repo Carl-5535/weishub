@@ -78,9 +78,11 @@ export function formatRemaining(remainingMs: number): string {
 /**
  * iLink 的凭据失效错误码。服务端以 HTTP 200 + `errcode` 返回，
  * 这不走 HTTP 状态码，因此必须从错误文案里的 errcode 识别。
- * -14 = session timeout（token 过期/被顶掉，实测最常遇到）
+ * -14 = session timeout（token 过期/被顶掉，实测最常遇到）。
+ * 注意不含 -1：那是微信系 API 通用的「系统繁忙，稍后重试」，不是鉴权失败——
+ * 误判成凭据被拒会把轮询打进 10 分钟长退避、面板误报需要重新扫码。
  */
-const CREDENTIAL_ERRCODES = new Set([-14, -1, 401, 403])
+const CREDENTIAL_ERRCODES = new Set([-14, 401, 403])
 
 /**
  * 从通道错误里识别「凭据被服务端拒绝」。

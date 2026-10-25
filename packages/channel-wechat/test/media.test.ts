@@ -117,6 +117,15 @@ describe('媒体加解密', () => {
     const ciphertext = encryptMedia(Buffer.from('x'), randomBytes(16))
     expect(() => decryptMedia(ciphertext, Buffer.from('short').toString('base64'))).toThrow(/密钥/)
   })
+
+  it('密文损坏（截断/非块对齐）被拒绝而不是返回垃圾', () => {
+    const key = randomBytes(16)
+    const ciphertext = encryptMedia(Buffer.from('完整的一段密文', 'utf8'), key)
+    // 截掉一半：不再是完整的块序列
+    expect(() => decryptMedia(ciphertext.slice(0, 8), key.toString('base64'))).toThrow()
+    // 非块对齐长度
+    expect(() => decryptMedia(ciphertext.slice(0, ciphertext.byteLength - 3), key.toString('base64'))).toThrow()
+  })
 })
 
 describe('safeFileName', () => {

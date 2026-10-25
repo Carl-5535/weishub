@@ -180,19 +180,25 @@ export async function serve(
   }
 
   // wx CLI 的连接配置：token 用 hub 的 notify token（wx 与 notify API 必须同源才能过认证）；
-  // notify-port 取 Hub 实际监听端口
-  const token = hub.notifyToken
-  const home = dataDir()
-  await mkdir(home, { recursive: true, mode: 0o700 })
-  await writeFile(join(home, 'token'), `${token}\n`, { mode: 0o600 })
-  await writeFile(join(home, 'notify-port'), `${hub.notifyPort ?? 0}\n`, { mode: 0o600 })
-  if (process.platform !== 'win32') {
-    await chmod(join(home, 'token'), 0o600).catch(() => undefined)
-    await chmod(join(home, 'notify-port'), 0o600).catch(() => undefined)
+  // notify-port 取 Hub 实际监听端口。这一段任何一步失败都必须停掉 hub——
+  // notify api 与轮询长挂会吊住进程，留下一个无面板、占着锁的僵尸实例。
+  let web
+  try {
+    const token = hub.notifyToken
+    const home = dataDir()
+    await mkdir(home, { recursive: true, mode: 0o700 })
+    await writeFile(join(home, 'token'), `${token}\n`, { mode: 0o600 })
+    await writeFile(join(home, 'notify-port'), `${hub.notifyPort ?? 0}\n`, { mode: 0o600 })
+    if (process.platform !== 'win32') {
+      await chmod(join(home, 'token'), 0o600).catch(() => undefined)
+      await chmod(join(home, 'notify-port'), 0o600).catch(() => undefined)
+    }
+    web = await startWebServer({ hub, token, port: options.webPort })
+  } catch (error) {
+    await hub.stop().catch(() => undefined)
+    throw error
   }
-
-  const web = await startWebServer({ hub, token, port: options.webPort })
-  const url = panelUrl(web.port, token)
+  const url = panelUrl(web.port, hub.notifyToken)
   stdout.write(`微枢已启动。面板地址：${url}\n`)
   stdout.write('微信消息将自动分发给绑定的 agent；按 Ctrl-C 停止。\n')
   // 自动打开面板（WEISHUB_NO_OPEN=1 可关闭）

@@ -795,6 +795,66 @@ test('非凭据轮询失败要有 stderr 日志，且连续失败只记一次（
   }
 })
 
+test('审批请求经 notify API 推送到微信（桥只登记不推送，推送由 hub 补）', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  const res = await fetch(`http://127.0.0.1:${kit.hub.notifyPort}/approvals/request`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${kit.hub.notifyToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ chatId: 'owner-1::claude', tool: 'Write', input: { file_path: '/tmp/x' } }),
+  })
+  expect(res.ok).toBe(true)
+  await drain(kit.hub)
+  // 推送目标是会话（lane 前缀剥掉 ::agent），带工具名与三个处置选项
+  const push = kit.sent.find((s) => s.chatId === 'owner-1')
+  expect(push).toBeDefined()
+  expect(push!.text).toContain('「claude」请求权限：Write')
+  expect(push!.text).toContain('同意')
+})
+
+test('重新扫码后发件箱续发走新 client（旧 token 已失效，续发必须换）', async () => {
+  await writeCredential()
+  const second = fakeClient()
+  const kit = makeHub({ createClient: () => second.client })
+  await kit.hub.start()
+  await kit.hub.reloadCredential()
+  // 入队在换 client 之后：drain 必须走 second，而不是构造时的旧 client
+  kit.hub.outbox.enqueue('owner-1', '换绑后续发的回复')
+  await drain(kit.hub)
+  expect(second.sent.some((s) => s.text.includes('换绑后续发的回复'))).toBe(true)
+  expect(kit.sent).toHaveLength(0)
+})
+
+test('持久化的默认 agent 已卸载：消息改绑到可用 agent 并正常处理（不再静默拒绝）', async () => {
+  await writeCredential()
+  await writeFile(join(homeDir, 'state.json'), JSON.stringify({
+    lanes: [{ chatId: 'owner-1', agentName: 'codex' }],
+    defaults: { 'owner-1': 'codex' },
+  }), { mode: 0o600 })
+  // 本 hub 只发现 claude：codex 已「卸载」
+  const kit = makeHub({ agents: [agentClaude] })
+  await kit.hub.start()
+  await kit.hub.handleInbound(msg({ text: '跑个任务' }))
+  await drain(kit.hub)
+  expect(kit.calls).toHaveLength(1)
+  expect(kit.calls[0]!.config.name).toBe('claude')
+  expect(kit.sent.some((s) => s.text.includes('已改绑 agent「claude」'))).toBe(true)
+})
+
+test('面板注入消息不清除凭据拒绝状态（只有真实微信消息才算凭据存活的证据）', async () => {
+  await writeCredential()
+  const kit = makeHub()
+  await kit.hub.start()
+  kit.client.poll = (async () => { throw new Error('getupdates 失败 (ret=0, errcode=-14): session timeout') }) as HubDeps['client']['poll']
+  await kit.hub.tick()
+  expect(kit.hub.credentialHealth.state).toBe('rejected')
+  await kit.hub.handleInbound(msg({ text: '面板插话' }), 'panel')
+  expect(kit.hub.credentialHealth.state).toBe('rejected')
+  await kit.hub.handleInbound(msg({ text: '微信消息' }))
+  expect(kit.hub.credentialHealth.state).not.toBe('rejected')
+})
+
 test('凭据检查不消费消息、不推进游标（探活绝不能抢主循环的 getupdates）', async () => {
   await writeCredential()
   const kit = makeHub()
