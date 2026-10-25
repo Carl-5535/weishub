@@ -132,12 +132,26 @@ async function settle(kit: HubKit, n = 1): Promise<void> {
   await drain(kit.hub)
 }
 
-test('非 owner 的消息被忽略（owner-only 白名单）', async () => {
+test('首条陌生私聊认主并处理；认领后其他发送者被忽略（owner 兜底）', async () => {
   const { hub, sent, calls } = makeHub()
+  // 凭据 userId（owner-1）与真实会话 id 不同代际：第一条私聊消息认主
   await hub.handleInbound(msg({ userId: 'stranger', chatId: 'stranger', text: 'hello' }))
   await drain(hub)
+  expect(hub.ownerUserId).toBe('stranger')
+  expect(calls).toHaveLength(1) // 认主后照常进入任务管线
+  expect(sent.length).toBeGreaterThan(0)
+  // 认领既定：另一个发送者照旧忽略
+  await hub.handleInbound(msg({ userId: 'other', chatId: 'other', text: 'hi' }))
+  await drain(hub)
+  expect(calls).toHaveLength(1)
+})
+
+test('群聊消息不认主，始终忽略', async () => {
+  const { hub, calls } = makeHub()
+  await hub.handleInbound(msg({ userId: 'stranger', chatId: 'room-1', text: 'hi', group: true }))
+  await drain(hub)
+  expect(hub.ownerUserId).toBe('owner-1') // 未被认领
   expect(calls).toHaveLength(0)
-  expect(sent).toHaveLength(0)
 })
 
 test('重复 msg.id 只处理一次（dedupe）', async () => {

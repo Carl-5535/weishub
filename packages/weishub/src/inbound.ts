@@ -192,6 +192,14 @@ export class Hub {
   #lastActivityAt: string | undefined
   /** 服务端明确拒绝过凭据（重新扫码后清除） */
   #credentialRejected: string | undefined
+  /**
+   * 认领的 owner id：凭据 userId 与真实会话 id 不同代际时的兜底。
+   * iLink 对同一微信用户在不同绑定代际可能下发不同的会话 id——重新扫码后
+   * 凭据 userId 变了、消息发送者 id 却是旧的，机械比对会把 owner 全部拒掉。
+   * 规则：尚无认领时，第一条私聊消息的发送者成为 owner（持久化；重新扫码时重置）。
+   * 已有认领后其他发送者照旧忽略（带日志）。
+   */
+  #claimedOwnerUserId: string | undefined
 
   constructor(deps: HubDeps) {
     this.#deps = deps
@@ -285,9 +293,9 @@ export class Hub {
     }
   }
 
-  /** owner 白名单 id（Web 面板以 owner 身份注入消息用）。 */
+  /** owner 白名单 id（Web 面板以 owner 身份注入消息用）：认领优先，凭据 userId 兜底。 */
   get ownerUserId(): string {
-    return this.#deps.ownerUserId
+    return this.#claimedOwnerUserId ?? this.#deps.ownerUserId
   }
 
   /** 已发现可用 agent 名（Web 面板聊天列表徽标与工作目录表单用）。 */
@@ -322,7 +330,7 @@ export class Hub {
 
   /** owner 会话 id（owner-only 模型下的唯一真实微信会话）。 */
   #ownerChatId(): string {
-    return this.#deps.ownerUserId
+    return this.ownerUserId
   }
 
   /**
@@ -383,9 +391,11 @@ export class Hub {
   async reloadCredential(): Promise<boolean> {
     try {
       const fresh = await readCredential(defaultCredentialPath())
-      // 重新扫码拿到新凭据：清除「服务端拒绝过」的旧结论，并视为一次活动
+      // 重新扫码拿到新凭据：清除「服务端拒绝过」的旧结论与上一代际的 owner 认领
+      // （新绑定下会话 id 可能换代，由下一条私聊消息重新认领），并视为一次活动
       this.#credential = fresh
       this.#credentialRejected = undefined
+      this.#claimedOwnerUserId = undefined
       this.#lastActivityAt = new Date().toISOString()
       // token 在 client 构造时固化，换了凭据必须换 client，否则循环重跑也用旧 token
       if (this.#deps.createClient !== undefined) this.#client = this.#deps.createClient(fresh)
@@ -419,8 +429,8 @@ export class Hub {
     this.#notify = await startNotifyApi({
       token: this.#notifyToken,
       ownerChatId: this.#deps.ownerUserId,
-      sendText: (text) => this.#sendOutbound(() => this.#client.sendText(this.#deps.ownerUserId, text)),
-      sendImage: (name, bytes) => this.#sendOutbound(() => this.#client.sendMedia(this.#deps.ownerUserId, name, bytes)),
+      sendText: (text) => this.#sendOutbound(() => this.#client.sendText(this.ownerUserId, text)),
+      sendImage: (name, bytes) => this.#sendOutbound(() => this.#client.sendMedia(this.ownerUserId, name, bytes)),
       outbox: this.outbox,
       approvals: this.approvals,
       getLoggedIn: () => this.#credential !== undefined,
@@ -538,13 +548,22 @@ export class Hub {
         this.#seen.delete(oldest)
       }
     }
-    if (message.userId !== this.#deps.ownerUserId) {
-      // 不能静默：重新扫码后 userId 可能与历史会话不一致（或陌生人/群聊消息），
-      // 静默丢弃表现为「发了没反应」，无任何线索可查。
-      process.stderr.write(
-        `微枢：忽略非 owner 消息（来自 ${message.userId}，会话 ${message.chatId}，群聊=${message.group}；owner=${this.#deps.ownerUserId}）\n`,
-      )
-      return
+    if (message.userId !== this.ownerUserId) {
+      if (this.#claimedOwnerUserId === undefined && !message.group) {
+        // 认主：见 #claimedOwnerUserId 注释。fresh 绑定后凭据 userId 与真实会话
+        // id 可能不同代际，机械比对会把 owner 本人拒掉（真机实测踩过）。
+        this.#claimedOwnerUserId = message.userId
+        process.stderr.write(
+          `微枢：认领 owner=${message.userId}（凭据 userId=${this.#deps.ownerUserId} 不匹配）。如非预期，删除状态文件里的 claimedOwnerUserId 后重启。\n`,
+        )
+        await this.#persistState().catch(() => undefined)
+      } else {
+        // 群聊消息与陌生发送者照旧忽略；不能静默——静默丢弃表现为「发了没反应」，无任何线索可查。
+        process.stderr.write(
+          `微枢：忽略非 owner 消息（来自 ${message.userId}，会话 ${message.chatId}，群聊=${message.group}；owner=${this.ownerUserId}）\n`,
+        )
+        return
+      }
     }
     const text = message.text.trim()
     if (text === '' && message.media.length === 0 && message.mediaErrors.length === 0) return
@@ -772,6 +791,7 @@ export class Hub {
         enabledAgent?: string
         lastActivityAt?: string
         credentialRejected?: string
+        claimedOwnerUserId?: string
       }>(defaultStatePath())
       // 新格式：每车道一条
       for (const lane of state.lanes ?? []) {
@@ -800,6 +820,10 @@ export class Hub {
       }
       if (typeof state.credentialRejected === 'string' && state.credentialRejected !== '') {
         this.#credentialRejected = state.credentialRejected
+      }
+      // owner 认领（凭据 userId 与会话 id 不同代际的兜底），只接受合法字符串
+      if (typeof state.claimedOwnerUserId === 'string' && state.claimedOwnerUserId !== '') {
+        this.#claimedOwnerUserId = state.claimedOwnerUserId
       }
       // 工作目录覆盖：只接受合法形态，其余按无覆盖处理
       const saved = state.workspace
@@ -830,6 +854,7 @@ export class Hub {
       ...(this.enabledAgent !== undefined ? { enabledAgent: this.enabledAgent } : {}),
       ...(this.#lastActivityAt !== undefined ? { lastActivityAt: this.#lastActivityAt } : {}),
       ...(this.#credentialRejected !== undefined ? { credentialRejected: this.#credentialRejected } : {}),
+      ...(this.#claimedOwnerUserId !== undefined ? { claimedOwnerUserId: this.#claimedOwnerUserId } : {}),
       ...(this.#protocol !== undefined ? { protocol: this.#protocol } : {}),
     }
     const write = this.#persistChain.catch(() => undefined).then(async () => {
