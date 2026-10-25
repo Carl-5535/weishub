@@ -1,7 +1,25 @@
 {
   "name": "@weishub/channel-wechat",
   "version": "0.1.0",
+  "description": "微枢的微信 iLink 通道实现：扫码登录、长轮询收发、CDN 媒体加解密、可靠发件箱",
   "license": "MIT",
+  "author": "Carl Chen",
+  "homepage": "https://github.com/Carl-5535/weishub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Carl-5535/weishub.git",
+    "directory": "packages/channel-wechat"
+  },
+  "bugs": {
+    "url": "https://github.com/Carl-5535/weishub/issues"
+  },
+  "keywords": [
+    "wechat",
+    "weixin",
+    "ilink",
+    "bot",
+    "channel"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,5 +28,16 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     }
+  },
+  "files": [
+    "lib",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "prepublishOnly": "cd ../.. && npm run build && npm test",
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,7 +1,30 @@
 {
   "name": "weishub",
   "version": "0.1.0",
+  "description": "微信 → 本机 AI agent 网关：把 claude / codex / opencode 等 agent 接进微信私聊，扫码即用",
   "license": "MIT",
+  "author": "Carl Chen",
+  "homepage": "https://github.com/Carl-5535/weishub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Carl-5535/weishub.git",
+    "directory": "packages/weishub"
+  },
+  "bugs": {
+    "url": "https://github.com/Carl-5535/weishub/issues"
+  },
+  "keywords": [
+    "wechat",
+    "weixin",
+    "ai",
+    "agent",
+    "claude",
+    "codex",
+    "opencode",
+    "gateway",
+    "bot",
+    "cli"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -15,6 +38,15 @@
       "default": "./lib/index.js"
     }
   },
+  "files": [
+    "lib",
+    "web",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "prepublishOnly": "cd ../.. && npm run build && npm test",
   "dependencies": {
     "@weishub/channel-wechat": "0.1.0",
     "@weishub/core": "0.1.0",

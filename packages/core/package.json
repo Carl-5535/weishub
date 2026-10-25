@@ -1,7 +1,25 @@
 {
   "name": "@weishub/core",
   "version": "0.1.0",
+  "description": "微枢核心：agent 配置与调度、车道并行、审批桥、发件箱可靠投递与会话管理",
   "license": "MIT",
+  "author": "Carl Chen",
+  "homepage": "https://github.com/Carl-5535/weishub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Carl-5535/weishub.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/Carl-5535/weishub/issues"
+  },
+  "keywords": [
+    "wechat",
+    "ai",
+    "agent",
+    "dispatcher",
+    "approval"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -10,6 +28,17 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     }
+  },
+  "files": [
+    "lib",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "prepublishOnly": "cd ../.. && npm run build && npm test",
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@weishub/channel-wechat": "0.1.0"

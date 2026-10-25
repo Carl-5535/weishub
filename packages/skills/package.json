@@ -1,9 +1,34 @@
 {
   "name": "@weishub/skills",
   "version": "0.1.0",
+  "description": "微枢配套技能包：weishub-notify 技能让 agent 主动向微信推送消息",
   "license": "MIT",
+  "author": "Carl Chen",
+  "homepage": "https://github.com/Carl-5535/weishub#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Carl-5535/weishub.git",
+    "directory": "packages/skills"
+  },
+  "bugs": {
+    "url": "https://github.com/Carl-5535/weishub/issues"
+  },
+  "keywords": [
+    "wechat",
+    "ai",
+    "agent",
+    "skill",
+    "notify"
+  ],
   "type": "module",
   "files": [
-    "weishub-notify"
-  ]
+    "weishub-notify",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

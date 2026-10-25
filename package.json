@@ -10,10 +10,6 @@
   "workspaces": [
     "packages/*"
   ],
-  "bin": {
-    "weishub": "packages/weishub/lib/cli.js",
-    "wx": "packages/weishub/lib/wx.js"
-  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -b packages/channel-wechat packages/core packages/weishub",
