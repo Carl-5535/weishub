@@ -8,10 +8,8 @@
 
 要求 Node.js ≥ 20，本机装有想用的 agent CLI（如 claude）。
 
-> npm 包即将发布；当前请从源码安装：
-> `git clone https://github.com/Carl-5535/weishub && cd weishub && npm ci && npm run build && npm install -g ./packages/weishub`
-
 ```bash
+npm install -g weishub
 weishub            # 打印面板地址并自动打开浏览器
 ```
 
