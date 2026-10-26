@@ -1,6 +1,6 @@
 {
   "name": "weishub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "微信 → 本机 AI agent 网关：把 claude / codex / opencode 等 agent 接进微信私聊，扫码即用",
   "license": "MIT",
   "author": "Carl Chen",
