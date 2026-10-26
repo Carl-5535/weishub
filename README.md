@@ -1,10 +1,13 @@
 # <img src="assets/icon.svg" width="28" alt="微枢图标"> 微枢 weishub
 
+[![npm](https://img.shields.io/npm/v/weishub)](https://www.npmjs.com/package/weishub)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ![微枢 weishub——微信里 @ 谁，谁就开工](assets/cover.png)
 
 在微信里指挥本机的 AI agent：手机发一条消息，claude / codex 等 CLI agent 在你的电脑上干活，结果直接回到微信对话框。
 
-> 状态：**实验阶段**（v1 未发布，配置接口可能变动）。当前安装方式为从源码构建，尚无 npm registry 包。License: MIT
+> 状态：**实验阶段**（配置接口可能变动）。零运行时依赖，安装即用。
 
 ## 它能做什么
 
@@ -24,13 +27,18 @@
 ### 安装
 
 ```bash
+npm install -g weishub
+```
+
+想跟源码走（或参与开发）则从源码构建：
+
+```bash
 git clone https://github.com/Carl-5535/weishub.git && cd weishub
-npm install
-npm run build
+npm install && npm run build
 npm install -g ./packages/weishub
 ```
 
-注意：这是 workspace 链接式安装，全局 `weishub` 命令指向本仓库目录——安装后不要移动/删除仓库。
+注意：源码这种方式是 workspace 链接式安装，全局 `weishub` 命令指向本仓库目录——安装后不要移动/删除仓库；更新时在仓库里重新 build + install 即可。
 
 ### 启动
 
@@ -75,7 +83,7 @@ wx send "来自终端的消息"
 | --- | --- | --- |
 | 启动报「另一个 weishub 实例正在运行 (pid=…)」 | 已有实例在跑 | 停掉旧实例；若确认没有，删除 `~/.weishub/hub.lock` |
 | `wx` 报「未找到 hub 令牌」 | `weishub` 没在运行 | 先启动 `weishub` |
-| `wx` 报 HTTP 401 | 全局安装的是旧版（token 接线修复前） | 在仓库重新 `npm run build && npm install -g ./packages/weishub` |
+| `wx` 报 HTTP 401 | 全局安装的是旧版 | `npm install -g weishub@latest` 更新；源码安装则在仓库重新 `npm run build && npm install -g ./packages/weishub` 后重启 |
 | 启动时警告「检测到旧微信插件仍在活动」 | 旧 dsh-wechat-gateway 在抢同一长轮询通道 | 先停掉旧插件，见[迁移说明](docs/migration-dsh.md) |
 | `wx send` 报「微信通道未就绪」 | 凭据过期（约 24 小时），或重新扫码后机器人尚未获得会话权 | 手机上给机器人发条消息即自动续期/激活；内容会保留在发件箱，通道恢复后自动补发 |
 | 发消息没反应，`wx send` 一直「微信通道未就绪」 | 绑定在服务端卡死（出站假成功、入站不投递） | 备份并删除 `~/.weishub/account.json` 后重启 `weishub` 重新扫码（避免服务端把扫码重定向回旧绑定） |
