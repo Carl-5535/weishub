@@ -183,17 +183,42 @@
 
   // ---- 扫码登录 ----
 
+  /** 用内置 qrcodegen 把二维码原文画到 canvas（白底黑块，带 4 模块静区）。
+   *  按码点数选整数倍缩放并以原始尺寸展示，避免浏览器非整数缩放把模块边缘糊成灰块。 */
+  function drawQr(text) {
+    const qr = qrcodegen.QrCode.encodeText(text, qrcodegen.QrCode.Ecc.MEDIUM)
+    const canvas = $('qr-img')
+    const border = 4
+    const scale = Math.max(4, Math.floor(208 / (qr.size + border * 2)))
+    const dim = (qr.size + border * 2) * scale
+    canvas.width = dim
+    canvas.height = dim
+    canvas.style.width = dim + 'px'
+    canvas.style.height = dim + 'px'
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#fff'
+    ctx.fillRect(0, 0, dim, dim)
+    ctx.fillStyle = '#000'
+    for (let y = 0; y < qr.size; y++) {
+      for (let x = 0; x < qr.size; x++) {
+        if (qr.getModule(x, y)) ctx.fillRect((x + border) * scale, (y + border) * scale, scale, scale)
+      }
+    }
+  }
+
   async function startQr() {
     if (qrActive) return
     qrActive = true
     $('qr-status').textContent = '正在获取二维码…'
     try {
       const r = await post('/api/qr/start')
-      $('qr-img').src = r.dataUrl
+      drawQr(r.display)
       $('qr-img').hidden = false
       $('qr-status').textContent = '用手机微信扫码'
     } catch (e) {
       qrActive = false
+      // 旧码必须藏起来：服务端此时已重置登录会话，留着它会被当成有效码去扫
+      $('qr-img').hidden = true
       $('qr-status').textContent = '获取二维码失败：' + e.message
     }
   }

@@ -321,7 +321,7 @@ test('PUT /api/workspace 支持 perAgent 覆盖并优先于全局', async () => 
   expect((await putJson(srv.url, '/api/workspace', { global: 42 })).status).toBe(400)
 })
 
-test('/api/qr/start 用注入的假 fetch 返回 display 与二维码 dataUrl；poll confirmed 写凭据', async () => {
+test('/api/qr/start 用注入的假 fetch 返回 display（二维码由前端生成）；poll confirmed 写凭据', async () => {
   const fakeFetch = vi.fn(async (input: string | URL | Request): Promise<Response> => {
     const href = typeof input === 'string' ? input : input instanceof Request ? input.url : input.href
     if (href.includes('get_bot_qrcode')) {
@@ -341,9 +341,10 @@ test('/api/qr/start 用注入的假 fetch 返回 display 与二维码 dataUrl；
   const srv = await makeServer(kit.hub, { fetch: fakeFetch as typeof globalThis.fetch })
   const res = await postJson(srv.url, '/api/qr/start', {})
   expect(res.status).toBe(200)
-  const body = (await res.json()) as { display: string; dataUrl: string }
+  const body = (await res.json()) as { display: string; dataUrl?: string }
   expect(body.display).toBe('https://login.example/qr')
-  expect(body.dataUrl).toMatch(/^data:image\/png;base64,/)
+  // 服务端不再生成图片（零运行时依赖）：二维码编码完全在前端做
+  expect(body.dataUrl).toBeUndefined()
 
   const poll = await get(srv.url, '/api/qr/poll')
   expect(poll.status).toBe(200)
@@ -369,6 +370,20 @@ test('GET / 返回面板页面；GET /app.js 返回脚本', async () => {
   expect(js.headers.get('content-type')).toContain('javascript')
   expect(await js.text()).toContain('/api/state')
   expect((await get(url, '/nope.js')).status).toBe(404)
+})
+
+test('qrcodegen.js 可被面板拿到：页面引用带 token（否则子资源 401），内容是内置编码器', async () => {
+  const kit = makeHub()
+  const { url } = await makeServer(kit.hub)
+  const html = await (await get(url, '/')).text()
+  // 页面必须给 qrcodegen.js 注入 token（浏览器子资源不继承页面查询参数）
+  expect(html).toMatch(/<script src="qrcodegen\.js\?v=[0-9a-f]+&token=/)
+  const js = await get(url, '/qrcodegen.js')
+  expect(js.status).toBe(200)
+  expect(js.headers.get('content-type')).toContain('javascript')
+  // 缓存版本号须同时覆盖 app.js 与 qrcodegen.js：改任一文件 URL 都要变
+  const v1 = (html.match(/qrcodegen\.js\?v=([0-9a-f]+)/) ?? [])[1]
+  expect(v1).toBeTruthy()
 })
 
 test('PUT /api/agent 切换默认 agent；既有车道保持独立不被打断', async () => {

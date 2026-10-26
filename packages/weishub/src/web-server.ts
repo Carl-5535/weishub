@@ -15,7 +15,6 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import QRCode from 'qrcode'
 import {
   defaultCredentialPath,
   LoginProtocolError,
@@ -147,6 +146,9 @@ export async function startWebServer(
     if (req.method === 'GET' && path === '/app.js') {
       return serveFile(res, 'app.js')
     }
+    if (req.method === 'GET' && path === '/qrcodegen.js') {
+      return serveFile(res, 'qrcodegen.js')
+    }
     // ---- API ----
     if (req.method === 'GET' && path === '/api/state') {
       const snapshot = hub.dispatcher.snapshot()
@@ -190,8 +192,8 @@ export async function startWebServer(
     if (req.method === 'POST' && path === '/api/qr/start') {
       try {
         loginSession = await startLoginSession({ fetch: fetchImpl })
-        const dataUrl = await QRCode.toDataURL(loginSession.display)
-        return send(res, 200, { display: loginSession.display, dataUrl })
+        // 只下发二维码原文，图片由前端用内置 qrcodegen 生成（服务端零运行时依赖）
+        return send(res, 200, { display: loginSession.display })
       } catch (error) {
         loginSession = undefined
         return send(res, 502, { error: `获取二维码失败: ${(error as Error).message}` })
@@ -305,15 +307,20 @@ export async function startWebServer(
    * 必然被 401 拦掉、整个脚本不执行、页面成空壳——所以必须在服务端补上。
    */
   /**
-   * app.js 内容哈希：页面的 script 引用带上它，
-   * 代码一改 URL 就变，浏览器不会拿旧缓存跑出新旧混杂的白屏。
+   * app.js + qrcodegen.js 内容哈希：页面的 script 引用带上它，
+   * 任一文件一改 URL 就变，浏览器不会拿旧缓存跑出新旧混杂的白屏。
    */
   async function assetVersion(): Promise<string> {
     if (versionCache !== undefined) return versionCache
     try {
-      versionCache = createHash('sha256').update(await readFile(join(WEB_DIR, 'app.js'))).digest('hex').slice(0, 10)
+      const hash = createHash('sha256')
+      hash.update(await readFile(join(WEB_DIR, 'app.js')))
+      hash.update(await readFile(join(WEB_DIR, 'qrcodegen.js')))
+      versionCache = hash.digest('hex').slice(0, 10)
     } catch {
-      versionCache = '0'
+      // 只降级本次响应，不缓存：失败往往是升级覆盖文件的瞬间，
+      // 缓存 '0' 会把 ?v=0 钉死到重启，浏览器从此拿旧脚本
+      return '0'
     }
     return versionCache
   }
@@ -326,6 +333,9 @@ export async function startWebServer(
       const body = html.replace(
         '<script src="app.js"></script>',
         `<script src="app.js?v=${version}&token=${token}"></script>`,
+      ).replace(
+        '<script src="qrcodegen.js"></script>',
+        `<script src="qrcodegen.js?v=${version}&token=${token}"></script>`,
       )
       res.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',

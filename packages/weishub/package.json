@@ -49,7 +49,6 @@
   "prepublishOnly": "cd ../.. && npm run build && npm test",
   "dependencies": {
     "@weishub/channel-wechat": "0.1.0",
-    "@weishub/core": "0.1.0",
-    "qrcode": "^1.5.4"
+    "@weishub/core": "0.1.0"
   }
 }

@@ -250,7 +250,7 @@
   .overlay-close { position: absolute; top: 6px; right: 6px; z-index: 1; }
   .qr-box { padding: 18px; display: grid; justify-items: center; gap: 12px; text-align: center; }
   .qr-actions { display: flex; gap: 4px; }
-  .qr-box img { width: 208px; height: 208px; border-radius: 6px; background: #fff; padding: 6px; }
+  .qr-box canvas { max-width: 100%; border-radius: 6px; background: #fff; padding: 6px; box-sizing: border-box; }
   .qr-box .quote { max-width: 38ch; color: var(--slate); font-size: 12.5px; }
 
   @media (max-width: 760px) {
@@ -339,7 +339,7 @@
     </button>
     <div class="qr-box">
       <h3 id="qr-title">扫码登录微信</h3>
-      <img id="qr-img" alt="微信登录二维码">
+      <canvas id="qr-img" width="208" height="208" aria-label="微信登录二维码"></canvas>
       <p id="qr-status" class="quote">正在获取二维码…</p>
       <div class="qr-actions">
         <button id="qr-refresh" class="quiet">换个二维码</button>
@@ -348,6 +348,7 @@
     </div>
   </div>
 
-<script src="app.js"></script>
+<script src="qrcodegen.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
